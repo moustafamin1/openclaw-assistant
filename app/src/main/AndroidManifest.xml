@@ -41,9 +41,7 @@
     <!-- Camera -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- SMS -->
-    <uses-permission android:name="android.permission.SEND_SMS" />
-    <uses-permission android:name="android.permission.READ_SMS" />
+    <!-- SMS permissions removed for Play Protect compliance -->
 
     <!-- Contacts -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />

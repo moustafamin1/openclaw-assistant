@@ -217,7 +217,12 @@ class OpenClawSession(
                         finish()
                     },
                     onRetry = { startListening() },
-                    onInterrupt = { interruptAndListen() }
+                    onInterrupt = { interruptAndListen() },
+                    onSend = { commitAndSend() },
+                    onClear = {
+                        userQuery.value = ""
+                        partialText.value = ""
+                    }
                 )
             }
         }
@@ -454,7 +459,9 @@ class OpenClawSession(
                             is SpeechResult.Ready -> {
                                 Log.d(TAG, "SpeechResult.Ready received, transitioning to LISTENING")
                                 currentState.value = AssistantState.LISTENING
-                                playTone(android.media.ToneGenerator.TONE_PROP_BEEP)
+                                if (userQuery.value.isBlank()) {
+                                    playTone(android.media.ToneGenerator.TONE_PROP_BEEP)
+                                }
                             }
                             is SpeechResult.Processing -> {
                                 // No sound here - thinking ACK sound will play when AI starts processing
@@ -476,17 +483,28 @@ class OpenClawSession(
                             }
                             is SpeechResult.Result -> {
                                 Log.d(TAG, "SpeechResult.Result received: text='${result.text}'")
-                                hasActuallySpoken = true
-                                userQuery.value = result.text
-                                sendToOpenClaw(result.text)
+                                val chunk = result.text.trim()
+                                val triggerMatch = Regex("(?i)(?:^|\\s+)(send|over)[.!?]*$").find(chunk)
+                                partialText.value = ""
+                                if (triggerMatch != null) {
+                                    val cleaned = chunk.removeRange(triggerMatch.range).trim()
+                                    val combined = listOf(userQuery.value, cleaned).filter { it.isNotBlank() }.joinToString(" ")
+                                    if (combined.isNotBlank()) {
+                                        hasActuallySpoken = true
+                                        userQuery.value = combined
+                                        sendToOpenClaw(combined)
+                                    }
+                                } else if (chunk.isNotBlank()) {
+                                    userQuery.value = listOf(userQuery.value, chunk).filter { it.isNotBlank() }.joinToString(" ")
+                                }
                             }
                             is SpeechResult.Error -> {
                                 val elapsed = System.currentTimeMillis() - startTime
                                 val isTimeout = result.code == SpeechRecognizer.ERROR_SPEECH_TIMEOUT ||
                                               result.code == SpeechRecognizer.ERROR_NO_MATCH
 
-                                if (isTimeout && settings.continuousMode && elapsed < 10000) {
-                                    Log.d(TAG, "Speech timeout within 10s window ($elapsed ms), retrying...")
+                                if (isTimeout && (userQuery.value.isNotBlank() || (settings.continuousMode && elapsed < 10000))) {
+                                    Log.d(TAG, "Speech timeout while accumulating/listening ($elapsed ms), retrying...")
                                 } else if (
                                     result.code == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ||
                                     result.code == SpeechRecognizer.ERROR_CLIENT
@@ -516,7 +534,7 @@ class OpenClawSession(
                     }
                 }
 
-                if (listenResult == null && !hasActuallySpoken) {
+                if (listenResult == null && !hasActuallySpoken && userQuery.value.isBlank()) {
                     Log.w(TAG, "Speech recognition timed out (30s). Device may be locked.")
                     // Manual timeout - only close session if not thinking/speaking
                     val state = currentState.value
@@ -534,6 +552,38 @@ class OpenClawSession(
                 }
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) &&
+            (currentState.value == AssistantState.LISTENING || currentState.value == AssistantState.PROCESSING)
+        ) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if ((keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) &&
+            (currentState.value == AssistantState.LISTENING || currentState.value == AssistantState.PROCESSING)
+        ) {
+            commitAndSend()
+            return true
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
+    private fun commitAndSend() {
+        val fullText = listOf(userQuery.value, partialText.value)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+        if (fullText.isBlank()) return
+        listeningJob?.cancel()
+        speechManager.destroy()
+        partialText.value = ""
+        userQuery.value = fullText
+        sendToOpenClaw(fullText)
     }
 
     private var thinkingSoundJob: Job? = null
@@ -570,7 +620,7 @@ class OpenClawSession(
         scope.launch {
             val agentId = settings.defaultAgentId.takeIf { it.isNotBlank() && it != "main" }
             val voiceBackendId = resolveVoiceSessionBackendId()
-            if (!isOpenClawVoiceTarget() && voiceBackendId == null) {
+            if (!isOpenClawVoiceTarget() && voiceBackendId == null && settings.httpUrl.isBlank()) {
                 cancelInitialFillerPhrase()
                 cancelWaitPhraseTimer()
                 stopThinkingSound()
@@ -612,7 +662,7 @@ class OpenClawSession(
                 return@launch
             }
 
-            if (!isOpenClawVoiceTarget()) {
+            if (!isOpenClawVoiceTarget() && settings.httpUrl.isBlank()) {
                 cancelInitialFillerPhrase()
                 cancelWaitPhraseTimer()
                 stopThinkingSound()
@@ -1092,7 +1142,9 @@ fun AssistantUI(
     audioLevel: Float,
     onClose: () -> Unit,
     onRetry: () -> Unit,
-    onInterrupt: () -> Unit = {}
+    onInterrupt: () -> Unit = {},
+    onSend: () -> Unit = {},
+    onClear: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -1162,6 +1214,8 @@ fun AssistantUI(
             // breathes / ripples / pulses by state. The mic icon floats above
             // the sphere so the existing tap-to-interrupt affordance still
             // works while the assistant is speaking.
+            val hasDraft = (state == AssistantState.LISTENING || state == AssistantState.PROCESSING) &&
+                (userQuery.isNotBlank() || partialText.isNotBlank())
             Box(
                 modifier = Modifier
                     .size(140.dp)
@@ -1171,6 +1225,8 @@ fun AssistantUI(
                                 onClickLabel = stringResource(R.string.interrupt_description),
                                 role = Role.Button
                             ) { onInterrupt() }
+                        } else if (hasDraft) {
+                            Modifier.clickable(role = Role.Button) { onSend() }
                         } else Modifier
                     ),
                 contentAlignment = Alignment.Center,
@@ -1192,7 +1248,7 @@ fun AssistantUI(
             // Status text
             Text(
                 text = when (state) {
-                    AssistantState.LISTENING -> stringResource(R.string.state_listening)
+                    AssistantState.LISTENING -> if (hasDraft) "Listening… (Tap orb/Send, press Volume, or say 'send')" else stringResource(R.string.state_listening)
                     AssistantState.PROCESSING -> stringResource(R.string.state_processing)
                     AssistantState.THINKING -> stringResource(R.string.state_thinking)
                     AssistantState.PREPARING_SPEECH -> stringResource(R.string.preparing_speech)
@@ -1226,6 +1282,21 @@ fun AssistantUI(
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
+            }
+
+            if (hasDraft) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(onClick = onClear) {
+                        Text("Clear")
+                    }
+                    Button(onClick = onSend) {
+                        Text("Send")
+                    }
+                }
             }
 
             // Main text

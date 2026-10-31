@@ -30,7 +30,7 @@ class SettingsRepository(context: Context) {
 
     // HTTP Server URL (required)
     var httpUrl: String
-        get() = prefs.getString(KEY_HTTP_URL, "") ?: ""
+        get() = prefs.getString(KEY_HTTP_URL, DEFAULT_HTTP_URL) ?: DEFAULT_HTTP_URL
         set(value) {
             if (value != httpUrl) {
                 prefs.edit().putString(KEY_HTTP_URL, value).apply()
@@ -318,12 +318,12 @@ class SettingsRepository(context: Context) {
 
     // Connection Verified
     var isVerified: Boolean
-        get() = prefs.getBoolean(KEY_IS_VERIFIED, false)
+        get() = prefs.getBoolean(KEY_IS_VERIFIED, true)
         set(value) = prefs.edit().putBoolean(KEY_IS_VERIFIED, value).apply()
 
     // Has completed initial setup guide
     var hasCompletedSetup: Boolean
-        get() = prefs.getBoolean(KEY_HAS_COMPLETED_SETUP, false)
+        get() = prefs.getBoolean(KEY_HAS_COMPLETED_SETUP, true)
         set(value) = prefs.edit().putBoolean(KEY_HAS_COMPLETED_SETUP, value).apply()
 
     // Default Agent ID
@@ -338,7 +338,7 @@ class SettingsRepository(context: Context) {
 
     // Connection Type (Gateway vs Legacy)
     var connectionType: String
-        get() = prefs.getString(KEY_CONNECTION_TYPE, CONNECTION_TYPE_GATEWAY) ?: CONNECTION_TYPE_GATEWAY
+        get() = prefs.getString(KEY_CONNECTION_TYPE, CONNECTION_TYPE_HTTP) ?: CONNECTION_TYPE_HTTP
         set(value) = prefs.edit().putString(KEY_CONNECTION_TYPE, value).apply()
 
     // Connection type used by the voice session (wakeword / long-press home)
@@ -456,6 +456,7 @@ class SettingsRepository(context: Context) {
         
         const val CONNECTION_TYPE_GATEWAY = "gateway"
         const val CONNECTION_TYPE_HTTP = "http"
+        const val DEFAULT_HTTP_URL = "http://192.168.178.24:8642"
         
         const val GOOGLE_TTS_PACKAGE = "com.google.android.tts"
         
