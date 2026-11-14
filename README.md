@@ -50,6 +50,8 @@
 > automatically synced to the watch yet.
 >
 > **Build:** `./gradlew testDebugUnitTest assembleDebug`.
+>
+> **Second Brain TickTick Capture & Disaster Recovery:** See [`docs/second-brain-voice-setup.md`](docs/second-brain-voice-setup.md) (Mac Bridge glossary sync + optional `whisper-base-en` model download instructions).
 
 ---
 

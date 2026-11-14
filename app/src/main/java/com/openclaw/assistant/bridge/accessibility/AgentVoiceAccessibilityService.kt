@@ -2,11 +2,26 @@ package com.openclaw.assistant.bridge.accessibility
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Rect
 import android.graphics.Path
+import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
+import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.openclaw.assistant.bridge.WakeLockManager
+import com.openclaw.assistant.data.SettingsRepository
+import com.openclaw.assistant.service.TickTickVoiceCaptureService
+import com.openclaw.assistant.ticktick.ScreenOffVolumeKeyBridge
+import com.openclaw.assistant.ticktick.VolumeCaptureKeyHandler
+import com.openclaw.assistant.ticktick.VolumeTriggerMode
 import java.security.MessageDigest
 
 /**
@@ -27,22 +42,154 @@ import java.security.MessageDigest
  */
 class AgentVoiceAccessibilityService : AccessibilityService() {
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var holdDisplayWakeLock: PowerManager.WakeLock? = null
+    private var captureFinishedReceiverRegistered = false
+    private val captureFinishedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != TickTickVoiceCaptureService.ACTION_CAPTURE_FINISHED) return
+            volumeKeyHandler.syncExternalStop()
+            releaseHoldDisplayWakeLock()
+        }
+    }
+
+    private val volumeKeyHandler by lazy {
+        VolumeCaptureKeyHandler(
+            scheduleHoldTimeout = { delayMs, action ->
+                val runnable = Runnable { action() }
+                mainHandler.postDelayed(runnable, delayMs)
+                VolumeCaptureKeyHandler.CancellableTimer { mainHandler.removeCallbacks(runnable) }
+            },
+            onReplayVolumeTap = { keyCode -> replayVolumeStep(keyCode) },
+            onStartCapture = {
+                android.util.Log.i("AgentVoiceA11y", "Volume capture start via accessibility")
+                acquireHoldDisplayWakeLock()
+                TickTickVoiceCaptureService.startCapture(applicationContext)
+            },
+            onStopCapture = { cancel ->
+                android.util.Log.i("AgentVoiceA11y", "Volume capture stop via accessibility (cancel=$cancel)")
+                releaseHoldDisplayWakeLock()
+                TickTickVoiceCaptureService.stopCapture(applicationContext, cancel)
+            },
+        )
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        if (!captureFinishedReceiverRegistered) {
+            runCatching {
+                ContextCompat.registerReceiver(
+                    this,
+                    captureFinishedReceiver,
+                    IntentFilter(TickTickVoiceCaptureService.ACTION_CAPTURE_FINISHED),
+                    ContextCompat.RECEIVER_NOT_EXPORTED,
+                )
+                captureFinishedReceiverRegistered = true
+            }
+        }
+        ScreenOffVolumeKeyBridge.syncRegistration(applicationContext)
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
+        volumeKeyHandler.reset()
+        releaseHoldDisplayWakeLock()
+        unregisterCaptureFinishedReceiver()
+        ScreenOffVolumeKeyBridge.unregister()
         instance = null
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        volumeKeyHandler.reset()
+        releaseHoldDisplayWakeLock()
+        unregisterCaptureFinishedReceiver()
+        ScreenOffVolumeKeyBridge.unregister()
         instance = null
         super.onDestroy()
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() {
+        volumeKeyHandler.reset()
+        releaseHoldDisplayWakeLock()
+    }
+
+    override fun onKeyEvent(event: KeyEvent?): Boolean {
+        if (event == null) return false
+        val settings = SettingsRepository.getInstance(applicationContext)
+        if (!settings.tickTickCaptureEnabled) return false
+
+        val triggerMode = VolumeTriggerMode.fromPref(settings.tickTickVolumeTrigger)
+        if (ScreenOffVolumeKeyBridge.isCapturing() && triggerMode.matchesKeyCode(event.keyCode)) {
+            if (event.action == KeyEvent.ACTION_UP) {
+                ScreenOffVolumeKeyBridge.stopActiveCapture(
+                    cancel = (event.flags and KeyEvent.FLAG_CANCELED) != 0,
+                )
+            }
+            return true
+        }
+
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val mode = audioManager?.mode ?: AudioManager.MODE_NORMAL
+        val inCallOrRinging = mode == AudioManager.MODE_RINGTONE ||
+            mode == AudioManager.MODE_IN_CALL ||
+            mode == AudioManager.MODE_IN_COMMUNICATION
+
+        return volumeKeyHandler.handleKeyEvent(
+            keyCode = event.keyCode,
+            action = event.action,
+            repeatCount = event.repeatCount,
+            isCanceled = (event.flags and KeyEvent.FLAG_CANCELED) != 0,
+            enabled = settings.tickTickCaptureEnabled,
+            triggerMode = triggerMode,
+            holdThresholdMs = settings.tickTickHoldThresholdMs,
+            isInCallOrRinging = inCallOrRinging,
+        )
+    }
+
+    private fun replayVolumeStep(keyCode: Int) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+        val direction = when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP -> AudioManager.ADJUST_RAISE
+            KeyEvent.KEYCODE_VOLUME_DOWN -> AudioManager.ADJUST_LOWER
+            else -> return
+        }
+        runCatching {
+            audioManager.adjustSuggestedStreamVolume(
+                direction,
+                AudioManager.USE_DEFAULT_STREAM_TYPE,
+                AudioManager.FLAG_SHOW_UI,
+            )
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireHoldDisplayWakeLock() {
+        runCatching {
+            if (holdDisplayWakeLock?.isHeld == true) return
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            holdDisplayWakeLock = pm.newWakeLock(
+                PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
+                "WakeHermesClaw::A11yVolumeHold",
+            ).apply {
+                setReferenceCounted(false)
+                acquire(VolumeCaptureKeyHandler.DEFAULT_MAX_CAPTURE_MS + 10_000L)
+            }
+        }
+    }
+
+    private fun releaseHoldDisplayWakeLock() {
+        runCatching {
+            if (holdDisplayWakeLock?.isHeld == true) holdDisplayWakeLock?.release()
+        }
+        holdDisplayWakeLock = null
+    }
+
+    private fun unregisterCaptureFinishedReceiver() {
+        if (!captureFinishedReceiverRegistered) return
+        captureFinishedReceiverRegistered = false
+        runCatching { unregisterReceiver(captureFinishedReceiver) }
+    }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) { /* no-op: pull-driven service */ }
 
     fun performTap(x: Float, y: Float): Boolean {

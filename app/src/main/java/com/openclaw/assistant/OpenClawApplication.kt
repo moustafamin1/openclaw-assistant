@@ -74,6 +74,15 @@ class OpenClawApplication : Application() {
         AgentDiagnostics.initialize(this)
         BridgeActivityLog.initialize(this)
         WakeLockManager.initialize(this)
+        try {
+            if (com.openclaw.assistant.data.SettingsRepository.getInstance(this).tickTickGlossaryWeeklyEnabled) {
+                com.openclaw.assistant.ticktick.GlossarySyncScheduler.ensureScheduled(this)
+                com.openclaw.assistant.ticktick.GlossarySyncScheduler.enqueueImmediateCatchUpIfStale(this)
+            }
+            com.openclaw.assistant.ticktick.ScreenOffVolumeKeyBridge.syncRegistration(this)
+        } catch (e: Throwable) {
+            Log.w("OpenClawApp", "Glossary/volume bridge init skipped: ${e.message}")
+        }
     }
 
     private fun applySavedAppLocale() {

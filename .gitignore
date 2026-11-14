@@ -11,6 +11,9 @@ firebase-debug.log
 # VOICEVOX model files (large binary, downloaded at runtime)
 *.vvm
 
+# Optional Whisper fallback model (~166 MB, exceeds GitHub 100 MB file limit; see docs/second-brain-voice-setup.md)
+app/src/main/assets/whisper-base-en/
+
 # Agent instructions
 AGENTS.md
 

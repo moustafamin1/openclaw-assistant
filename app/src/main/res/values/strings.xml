@@ -1051,4 +1051,23 @@
     <string name="av_home_disconnected">Disconnected</string>
     <string name="av_home_test_ok_short">OK</string>
     <string name="av_home_test_failed_short">Failed</string>
+
+    <!-- TickTick Quick Capture (Volume Button Screen-Off STT, zero LLM) -->
+    <string name="settings_category_ticktick_capture">TickTick Quick Capture</string>
+    <string name="settings_category_ticktick_capture_desc">Hold volume key to dictate tasks directly to TickTick (no LLM)</string>
+    <string name="ticktick_channel_capture_name">TickTick Voice Capture</string>
+    <string name="ticktick_channel_status_name">TickTick Capture Status</string>
+    <string name="ticktick_notif_listening_title">TickTick mic active</string>
+    <string name="ticktick_notif_listening_body">Release volume key to save directly to Inbox</string>
+    <string name="ticktick_notif_save_now">Save now</string>
+    <string name="ticktick_notif_saved_title">Saved to TickTick Inbox</string>
+    <string name="ticktick_notif_queued_title">Queued offline for TickTick</string>
+    <string name="ticktick_notif_auth_title">TickTick sign-in needed</string>
+    <string name="ticktick_notif_blank_title">No speech detected</string>
+    <string name="ticktick_notif_blank_body">Hold volume key while speaking to capture a task</string>
+    <string name="ticktick_notif_error_title">TickTick capture failed</string>
+    <string name="ticktick_notif_mic_permission">Microphone permission required</string>
+    <string name="ticktick_notif_bg_mic_blocked">Android blocked background mic start; use the TickTick Capture Quick Tile or wake screen first.</string>
+    <string name="ticktick_tile_label_idle">TickTick Capture</string>
+    <string name="ticktick_tile_label_recording">Tap to Save Task</string>
 </resources>

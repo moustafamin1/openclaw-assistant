@@ -60,6 +60,7 @@ import com.openclaw.assistant.ui.backend.BackendListActivity
 import com.openclaw.assistant.ui.backend.ToolProgressFeed
 import com.openclaw.assistant.ui.bridge.MobileBridgeSettingsScreen
 import com.openclaw.assistant.ui.theme.OpenClawAssistantTheme
+import com.openclaw.assistant.ui.ticktick.TickTickCaptureSettingsContent
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.openclaw.assistant.utils.GatewayConfigUtils
 import com.openclaw.assistant.utils.SystemInfoProvider
@@ -1509,6 +1510,11 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(24.dp))
             }
 
+            if (selectedSettingsCategory == SettingsCategory.TickTickCapture) {
+                TickTickCaptureSettingsContent()
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
             // === WAKE WORD SECTION ===
             if (selectedSettingsCategory == SettingsCategory.WakeWord) {
             CollapsibleSection(title = stringResource(R.string.wake_word), collapsible = false) {
@@ -1926,6 +1932,7 @@ private enum class SettingsCategory {
     Chat,
     Voice,
     MobileBridge,
+    TickTickCapture,
     WakeWord,
     Diagnostics,
     Language,
@@ -1939,6 +1946,7 @@ private fun SettingsCategory.title(): String = when (this) {
     SettingsCategory.Chat -> stringResource(R.string.settings_category_chat)
     SettingsCategory.Voice -> stringResource(R.string.settings_category_voice_mode)
     SettingsCategory.MobileBridge -> stringResource(R.string.settings_category_mobile_bridge)
+    SettingsCategory.TickTickCapture -> stringResource(R.string.settings_category_ticktick_capture)
     SettingsCategory.WakeWord -> stringResource(R.string.wake_word)
     SettingsCategory.Diagnostics -> stringResource(R.string.diagnostics_title)
     SettingsCategory.Language -> stringResource(R.string.language_section)
@@ -1974,6 +1982,12 @@ private fun SettingsOverviewMenu(
             subtitle = stringResource(R.string.settings_category_mobile_bridge_desc),
             icon = Icons.Default.Security,
             onClick = { onSelected(SettingsCategory.MobileBridge) },
+        ),
+        SettingsOverviewItem(
+            title = stringResource(R.string.settings_category_ticktick_capture),
+            subtitle = stringResource(R.string.settings_category_ticktick_capture_desc),
+            icon = Icons.Default.AddTask,
+            onClick = { onSelected(SettingsCategory.TickTickCapture) },
         ),
         SettingsOverviewItem(
             title = stringResource(R.string.diagnostics_title),

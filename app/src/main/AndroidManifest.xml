@@ -22,6 +22,12 @@
 
     <!-- Keep CPU running even when screen is OFF -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission
+        android:name="android.permission.SET_VOLUME_KEY_LONG_PRESS_LISTENER"
+        tools:ignore="ProtectedPermissions" />
 
     <!-- Start service on boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -180,6 +186,16 @@
             android:name="com.openclaw.assistant.ui.diag.SelfCheckActivity"
             android:exported="false"
             android:theme="@style/Theme.OpenClawAssistant" />
+        <activity
+            android:name="com.openclaw.assistant.ui.ticktick.TickTickLockCaptureActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleInstance"
+            android:showOnLockScreen="true"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.OpenClawAssistant"
+            android:turnScreenOn="true" />
 
         <!-- Voice Interaction Service (Home button long press) -->
         <service
@@ -215,6 +231,24 @@
             android:name="com.openclaw.assistant.service.SessionForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- Headless Volume-Hold TickTick Voice Capture Service (no LLM) -->
+        <service
+            android:name="com.openclaw.assistant.service.TickTickVoiceCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- Quick Settings Tile for Lock-Screen / One-Tap TickTick Voice Capture -->
+        <service
+            android:name="com.openclaw.assistant.service.TickTickCaptureTileService"
+            android:icon="@drawable/ic_mic"
+            android:label="@string/ticktick_tile_label_idle"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
         <!-- Hotword Detection Service (Ambient Listening) -->
         <service

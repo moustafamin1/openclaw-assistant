@@ -347,6 +347,90 @@ class SettingsRepository(context: Context) {
         get() = prefs.getString(KEY_WAKEWORD_CONNECTION_TYPE, connectionType) ?: connectionType
         set(value) = prefs.edit().putString(KEY_WAKEWORD_CONNECTION_TYPE, value).apply()
 
+    // TickTick direct voice capture (no LLM)
+    var tickTickCaptureEnabled: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_CAPTURE_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_CAPTURE_ENABLED, value).apply()
+
+    var tickTickVolumeTrigger: String
+        get() = prefs.getString(KEY_TICKTICK_VOLUME_TRIGGER, TICKTICK_TRIGGER_VOLUME_DOWN)
+            ?: TICKTICK_TRIGGER_VOLUME_DOWN
+        set(value) = prefs.edit().putString(KEY_TICKTICK_VOLUME_TRIGGER, value).apply()
+
+    var tickTickHoldThresholdMs: Long
+        get() = prefs.getLong(KEY_TICKTICK_HOLD_THRESHOLD_MS, 400L).coerceIn(200L, 1200L)
+        set(value) = prefs.edit().putLong(KEY_TICKTICK_HOLD_THRESHOLD_MS, value.coerceIn(200L, 1200L)).apply()
+
+    var tickTickSpeechEngine: String
+        get() = prefs.getString(KEY_TICKTICK_SPEECH_ENGINE, TICKTICK_ENGINE_ANDROID_ON_DEVICE)
+            ?: TICKTICK_ENGINE_ANDROID_ON_DEVICE
+        set(value) = prefs.edit().putString(KEY_TICKTICK_SPEECH_ENGINE, value).apply()
+
+    var tickTickCustomVocabulary: String
+        get() = prefs.getString(
+            KEY_TICKTICK_CUSTOM_VOCABULARY,
+            com.openclaw.assistant.ticktick.TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+        ) ?: com.openclaw.assistant.ticktick.TranscriptNormalizer.DEFAULT_RAW_VOCABULARY
+        set(value) = prefs.edit().putString(KEY_TICKTICK_CUSTOM_VOCABULARY, value).apply()
+
+    var tickTickSyncedGlossary: String
+        get() = prefs.getString(KEY_TICKTICK_SYNCED_GLOSSARY, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_TICKTICK_SYNCED_GLOSSARY, value).apply()
+
+    var tickTickGlossaryPrimaryUrl: String
+        get() = prefs.getString(KEY_TICKTICK_GLOSSARY_PRIMARY_URL, DEFAULT_GLOSSARY_PRIMARY_URL)
+            ?: DEFAULT_GLOSSARY_PRIMARY_URL
+        set(value) = prefs.edit().putString(KEY_TICKTICK_GLOSSARY_PRIMARY_URL, value.trim()).apply()
+
+    var tickTickGlossaryFallbackUrl: String
+        get() = prefs.getString(KEY_TICKTICK_GLOSSARY_FALLBACK_URL, DEFAULT_GLOSSARY_FALLBACK_URL)
+            ?: DEFAULT_GLOSSARY_FALLBACK_URL
+        set(value) = prefs.edit().putString(KEY_TICKTICK_GLOSSARY_FALLBACK_URL, value.trim()).apply()
+
+    var tickTickGlossaryAuthToken: String
+        get() = prefs.getString(KEY_TICKTICK_GLOSSARY_AUTH_TOKEN, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_TICKTICK_GLOSSARY_AUTH_TOKEN, value.trim()).apply()
+
+    var tickTickGlossaryWeeklyEnabled: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_GLOSSARY_WEEKLY_ENABLED, true)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_GLOSSARY_WEEKLY_ENABLED, value).apply()
+
+    var tickTickGlossaryLastSyncAt: Long
+        get() = prefs.getLong(KEY_TICKTICK_GLOSSARY_LAST_SYNC_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_TICKTICK_GLOSSARY_LAST_SYNC_AT, value).apply()
+
+    var tickTickGlossaryLastStatus: String
+        get() = prefs.getString(KEY_TICKTICK_GLOSSARY_LAST_STATUS, "Not synced yet")
+            ?: "Not synced yet"
+        set(value) = prefs.edit().putString(KEY_TICKTICK_GLOSSARY_LAST_STATUS, value).apply()
+
+    fun effectiveTickTickVocabulary(): String {
+        return com.openclaw.assistant.ticktick.TranscriptNormalizer.mergeGlossaries(
+            syncedRaw = tickTickSyncedGlossary,
+            userCustomRaw = tickTickCustomVocabulary,
+        )
+    }
+
+    var tickTickAccessToken: String
+        get() = prefs.getString(KEY_TICKTICK_ACCESS_TOKEN, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_TICKTICK_ACCESS_TOKEN, value.trim()).apply()
+
+    var tickTickClientId: String
+        get() = prefs.getString(KEY_TICKTICK_CLIENT_ID, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_TICKTICK_CLIENT_ID, value.trim()).apply()
+
+    var tickTickHapticFeedback: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_HAPTIC_FEEDBACK, true)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_HAPTIC_FEEDBACK, value).apply()
+
+    var tickTickAudioCue: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_AUDIO_CUE, false)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_AUDIO_CUE, value).apply()
+
+    var tickTickStatusNotifications: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_STATUS_NOTIFICATIONS, false)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_STATUS_NOTIFICATIONS, value).apply()
+
     /**
      * Get the chat completions URL.
      * Supports both base URL (http://server) and full path (http://server/v1/chat/completions).
@@ -421,6 +505,36 @@ class SettingsRepository(context: Context) {
         private const val KEY_SPEECH_LANGUAGE = "speech_language"
         private const val KEY_APP_LANGUAGE = "app_language"
         private const val KEY_HAS_COMPLETED_SETUP = "has_completed_setup"
+        private const val KEY_TICKTICK_CAPTURE_ENABLED = "ticktick_capture_enabled"
+        private const val KEY_TICKTICK_VOLUME_TRIGGER = "ticktick_volume_trigger"
+        private const val KEY_TICKTICK_HOLD_THRESHOLD_MS = "ticktick_hold_threshold_ms"
+        private const val KEY_TICKTICK_SPEECH_ENGINE = "ticktick_speech_engine"
+        private const val KEY_TICKTICK_ACCESS_TOKEN = "ticktick_access_token"
+        private const val KEY_TICKTICK_CLIENT_ID = "ticktick_client_id"
+        private const val KEY_TICKTICK_HAPTIC_FEEDBACK = "ticktick_haptic_feedback"
+        private const val KEY_TICKTICK_AUDIO_CUE = "ticktick_audio_cue"
+        private const val KEY_TICKTICK_STATUS_NOTIFICATIONS = "ticktick_status_notifications"
+        private const val KEY_TICKTICK_CUSTOM_VOCABULARY = "ticktick_custom_vocabulary"
+        private const val KEY_TICKTICK_SYNCED_GLOSSARY = "ticktick_synced_glossary"
+        private const val KEY_TICKTICK_GLOSSARY_PRIMARY_URL = "ticktick_glossary_primary_url"
+        private const val KEY_TICKTICK_GLOSSARY_FALLBACK_URL = "ticktick_glossary_fallback_url"
+        private const val KEY_TICKTICK_GLOSSARY_AUTH_TOKEN = "ticktick_glossary_auth_token"
+        private const val KEY_TICKTICK_GLOSSARY_WEEKLY_ENABLED = "ticktick_glossary_weekly_enabled"
+        private const val KEY_TICKTICK_GLOSSARY_LAST_SYNC_AT = "ticktick_glossary_last_sync_at"
+        private const val KEY_TICKTICK_GLOSSARY_LAST_STATUS = "ticktick_glossary_last_status"
+
+        const val DEFAULT_GLOSSARY_PRIMARY_URL = "http://192.168.178.24:8642/glossary.json"
+        const val DEFAULT_GLOSSARY_FALLBACK_URL =
+            "https://raw.githubusercontent.com/moustafamin1/second-brain/main/assets/ticktick-glossary.json"
+
+        const val TICKTICK_TRIGGER_OFF = "off"
+        const val TICKTICK_TRIGGER_VOLUME_DOWN = "volume_down"
+        const val TICKTICK_TRIGGER_VOLUME_UP = "volume_up"
+        const val TICKTICK_TRIGGER_EITHER = "either"
+
+        const val TICKTICK_ENGINE_WHISPER_ONNX = "whisper_onnx"
+        const val TICKTICK_ENGINE_VOSK = "vosk"
+        const val TICKTICK_ENGINE_ANDROID_ON_DEVICE = "android_on_device"
         
         // TTS settings keys
         private const val KEY_TTS_TYPE = "tts_type"
