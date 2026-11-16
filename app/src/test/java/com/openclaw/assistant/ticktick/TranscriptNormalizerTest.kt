@@ -98,4 +98,19 @@ class TranscriptNormalizerTest {
         assertTrue(terms.contains("Schöneberg"))
         assertTrue(terms.contains("Wohnpark Südkreuz"))
     }
+
+    @Test
+    fun convertsSpokenBrainPrefixToDelegationSyntax() {
+        val raw1 = "brain check this image and add event to calendar"
+        assertEquals("@brain: Check this image and add event to calendar", TranscriptNormalizer.normalize(raw1))
+
+        val raw2 = "at brain please move all overdue tasks to today"
+        assertEquals("@brain: Please move all overdue tasks to today", TranscriptNormalizer.normalize(raw2))
+
+        val raw3 = "@brain research gold prices in Germany versus Egypt"
+        assertEquals("@brain: Research gold prices in Germany versus Egypt", TranscriptNormalizer.normalize(raw3))
+
+        val raw4 = "Brain, contact the therapist to reschedule my appointment"
+        assertEquals("@brain: Contact the therapist to reschedule my appointment", TranscriptNormalizer.normalize(raw4))
+    }
 }

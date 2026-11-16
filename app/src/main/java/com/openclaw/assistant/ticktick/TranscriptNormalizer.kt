@@ -23,6 +23,8 @@ object TranscriptNormalizer {
         Zebeeb = zabib, zabeeb, zebib, the bib, zeeb
         Insights Base = insight base, insights base
         Brain II = brain two, brain 2
+        @brain = at brain, at-brain
+        Brain = brian
         TickTick = tick tick, tic tic, tik tik
         Antigravity = anti gravity
         OpenClaw = open claw
@@ -140,6 +142,15 @@ object TranscriptNormalizer {
         )
         text = text.trim().replace(Regex("\\s+"), " ")
 
+        // 1c. Spoken @brain delegation prefix ("Brain ...", "Brain, ...", "@brain ...", "at brain ...")
+        text = text.replace(
+            Regex("""(?:^|[.!?]\s+)(?:(?:hey|please)\s+)?(?:at\s+|@)?(?:brain|brian)\b[:,\s]*""", RegexOption.IGNORE_CASE),
+        ) { match ->
+            val prefix = match.value.takeWhile { it == '.' || it == '!' || it == '?' || it.isWhitespace() }
+            "${prefix}@brain: "
+        }
+        text = text.trim().replace(Regex("\\s+"), " ")
+
         // 2. Apply multi-word explicit aliases first (longest-first, e.g. "tick tick" -> "TickTick")
         val lexicon = parseVocabulary(customVocabularyRaw.ifBlank { DEFAULT_RAW_VOCABULARY })
         val sortedMultiAliases = lexicon.explicitAliases.entries
@@ -185,15 +196,33 @@ object TranscriptNormalizer {
                 // Guard "naughty" / "moody" unless near project/tag context or exact uncommon alias
                 val needsContext = lowerCore in AMBIGUOUS_ENGLISH_WORDS
                 if (!needsContext || inProjectContext) {
-                    tokens[i] = "$leadingPunct$explicit$trailingPunct"
+                    val cleanExplicit = if (leadingPunct.contains('@') && explicit.startsWith('@')) {
+                        explicit.removePrefix("@")
+                    } else if (leadingPunct.contains('#') && explicit.startsWith('#')) {
+                        explicit.removePrefix("#")
+                    } else {
+                        explicit
+                    }
+                    tokens[i] = "$leadingPunct$cleanExplicit$trailingPunct"
                     continue
                 }
             }
 
             // 3b. Exact case-canonical match
+            if (leadingPunct.contains('@') && core.equals("brain", ignoreCase = true)) {
+                tokens[i] = "@brain$trailingPunct"
+                continue
+            }
             val exactCanonical = singleWordTerms.firstOrNull { it.equals(core, ignoreCase = true) }
             if (exactCanonical != null) {
-                tokens[i] = "$leadingPunct$exactCanonical$trailingPunct"
+                val cleanCanonical = if (leadingPunct.contains('@') && exactCanonical.startsWith('@')) {
+                    exactCanonical.removePrefix("@")
+                } else if (leadingPunct.contains('#') && exactCanonical.startsWith('#')) {
+                    exactCanonical.removePrefix("#")
+                } else {
+                    exactCanonical
+                }
+                tokens[i] = "$leadingPunct$cleanCanonical$trailingPunct"
                 continue
             }
 
@@ -226,7 +255,7 @@ object TranscriptNormalizer {
                 capitalizeNext = false
             } else {
                 sb.append(ch)
-                if (ch == '.' || ch == '?' || ch == '!') {
+                if (ch == '.' || ch == '?' || ch == '!' || ch == ':') {
                     capitalizeNext = true
                 } else if (!ch.isWhitespace() && ch != '"' && ch != '(') {
                     capitalizeNext = false
