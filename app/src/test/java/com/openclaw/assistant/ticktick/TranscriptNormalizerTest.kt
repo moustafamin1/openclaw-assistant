@@ -113,4 +113,19 @@ class TranscriptNormalizerTest {
         val raw4 = "Brain, contact the therapist to reschedule my appointment"
         assertEquals("@brain: Contact the therapist to reschedule my appointment", TranscriptNormalizer.normalize(raw4))
     }
+
+    @Test
+    fun normalizesOkrsAndTkMisrecognitionsAndSelectsBestHypothesis() {
+        assertEquals("Fix OKRs", TranscriptNormalizer.normalize("fix Okey Ours"))
+        assertEquals("Fix OKRs and TK", TranscriptNormalizer.normalize("fix okay ours and tk max"))
+
+        val best = TranscriptNormalizer.selectBestHypothesis(
+            listOf("fix okey ours", "fix OKRs", "fix okay are"),
+        )
+        assertEquals("fix OKRs", best)
+
+        val biasing = TranscriptNormalizer.biasingTerms()
+        assertTrue(biasing.contains("OKRs"))
+        assertTrue(biasing.contains("TK"))
+    }
 }

@@ -106,6 +106,7 @@ fun TickTickCaptureSettingsContent(
     var triggerMode by remember { mutableStateOf(settings.tickTickVolumeTrigger) }
     var holdThresholdMs by remember { mutableFloatStateOf(settings.tickTickHoldThresholdMs.toFloat()) }
     var speechEngine by remember { mutableStateOf(settings.tickTickSpeechEngine) }
+    var multiLangSwitch by remember { mutableStateOf(settings.tickTickMultiLangSwitch) }
     var hapticFeedback by remember { mutableStateOf(settings.tickTickHapticFeedback) }
     var audioCue by remember { mutableStateOf(settings.tickTickAudioCue) }
     var statusNotifications by remember { mutableStateOf(settings.tickTickStatusNotifications) }
@@ -461,55 +462,78 @@ fun TickTickCaptureSettingsContent(
                 }
 
                 if (speechEngine == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE && onDeviceGoogleSupported) {
-                    var langStatus by remember {
-                        mutableStateOf(OnDeviceLanguageSupport.cachedStatus)
-                    }
-                    LaunchedEffect(Unit) {
-                        langStatus = OnDeviceLanguageSupport.queryAndPrepare(
-                            context,
-                            triggerDownloads = true,
-                        )
-                    }
-                    val statusText = remember(langStatus) {
-                        val s = langStatus
-                        if (s == null) {
-                            "Checking EN / DE / AR on-device language packs..."
-                        } else {
-                            buildString {
-                                append("Active: ")
-                                append(s.installedDesired.joinToString(", ").ifBlank { "none" })
-                                if (s.missingSupported.isNotEmpty() || s.pendingDesired.isNotEmpty()) {
-                                    val dl = (s.missingSupported + s.pendingDesired).distinct()
-                                    append(" | Downloading: ${dl.joinToString(", ")}")
-                                }
-                                if (s.unsupportedFamilies.isNotEmpty()) {
-                                    append(" | No offline AiAi pack: ${s.unsupportedFamilies.joinToString(", ")}")
-                                }
-                            }
-                        }
-                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(
-                            onClick = {
-                                scope.launch {
-                                    langStatus = OnDeviceLanguageSupport.queryAndPrepare(
-                                        context,
-                                        triggerDownloads = true,
-                                    )
-                                }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Multilingual Auto-Switch (DE / AR)", style = MaterialTheme.typography.bodyMedium)
+                            Text(
+                                "Keep OFF for highest English accuracy; turns off German/Arabic STT switching.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = multiLangSwitch,
+                            onCheckedChange = {
+                                multiLangSwitch = it
+                                settings.tickTickMultiLangSwitch = it
                             },
+                        )
+                    }
+                    if (multiLangSwitch) {
+                        var langStatus by remember {
+                            mutableStateOf(OnDeviceLanguageSupport.cachedStatus)
+                        }
+                        LaunchedEffect(Unit) {
+                            langStatus = OnDeviceLanguageSupport.queryAndPrepare(
+                                context,
+                                triggerDownloads = true,
+                            )
+                        }
+                        val statusText = remember(langStatus) {
+                            val s = langStatus
+                            if (s == null) {
+                                "Checking EN / DE / AR on-device language packs..."
+                            } else {
+                                buildString {
+                                    append("Active: ")
+                                    append(s.installedDesired.joinToString(", ").ifBlank { "none" })
+                                    if (s.missingSupported.isNotEmpty() || s.pendingDesired.isNotEmpty()) {
+                                        val dl = (s.missingSupported + s.pendingDesired).distinct()
+                                        append(" | Downloading: ${dl.joinToString(", ")}")
+                                    }
+                                    if (s.unsupportedFamilies.isNotEmpty()) {
+                                        append(" | No offline AiAi pack: ${s.unsupportedFamilies.joinToString(", ")}")
+                                    }
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
-                            Text("Refresh Packs")
+                            Text(
+                                text = statusText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        langStatus = OnDeviceLanguageSupport.queryAndPrepare(
+                                            context,
+                                            triggerDownloads = true,
+                                        )
+                                    }
+                                },
+                            ) {
+                                Text("Refresh Packs")
+                            }
                         }
                     }
                 }

@@ -364,8 +364,9 @@ class TickTickVoiceCaptureService : Service() {
     private suspend fun captureWithAndroidOnDeviceStt(): String? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
 
-        // Prepare language pack list if not cached yet (bounded so capture start stays instant).
-        if (OnDeviceLanguageSupport.cachedStatus == null) {
+        val multiLangEnabled = settings.tickTickMultiLangSwitch
+        // Prepare language pack list if multi-language switching is explicitly enabled.
+        if (multiLangEnabled && OnDeviceLanguageSupport.cachedStatus == null) {
             withTimeoutOrNull(450L) {
                 OnDeviceLanguageSupport.queryAndPrepare(
                     this@TickTickVoiceCaptureService,
@@ -380,14 +381,20 @@ class TickTickVoiceCaptureService : Service() {
 
         val language = settings.speechLanguage.takeIf { it.isNotBlank() }
             ?: Locale.getDefault().toLanguageTag()
-        val switchTags = OnDeviceLanguageSupport.allowedSwitchTags(language)
-        val biasingList = TranscriptNormalizer.biasingTerms(settings.effectiveTickTickVocabulary())
+        val switchTags = if (multiLangEnabled) {
+            OnDeviceLanguageSupport.allowedSwitchTags(language)
+        } else {
+            emptyList()
+        }
+        val effectiveVocab = settings.effectiveTickTickVocabulary()
+        val biasingList = TranscriptNormalizer.biasingTerms(effectiveVocab)
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 300_000L)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 300_000L)
@@ -408,16 +415,19 @@ class TickTickVoiceCaptureService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && switchTags.size >= 2) {
                 putExtra(
                     RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH,
-                    RecognizerIntent.LANGUAGE_SWITCH_BALANCED,
+                    RecognizerIntent.LANGUAGE_SWITCH_HIGH_PRECISION,
                 )
                 putStringArrayListExtra(
                     RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES,
                     ArrayList(switchTags),
                 )
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                putExtra(RecognizerIntent.EXTRA_ENABLE_BIASING_DEVICE_CONTEXT, true)
+            }
         }
 
-        Log.i(TAG, "Starting Google On-Device STT primary=$language switchTags=$switchTags biasing=${biasingList.size}")
+        Log.i(TAG, "Starting Google On-Device STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags biasing=${biasingList.size}")
 
         val recognizer = withContext(Dispatchers.Main) {
             SpeechRecognizer.createOnDeviceSpeechRecognizer(this@TickTickVoiceCaptureService).also { rec ->
@@ -446,11 +456,10 @@ class TickTickVoiceCaptureService : Service() {
                     }
 
                     override fun onSegmentResults(segmentResults: Bundle) {
-                        val segText = segmentResults
+                        val candidates = segmentResults
                             .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull()
                             .orEmpty()
-                            .trim()
+                        val segText = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab)
                         if (segText.isNotEmpty()) {
                             sessionSegments.add(segText)
                             latestAndroidPartial = ""
@@ -464,11 +473,10 @@ class TickTickVoiceCaptureService : Service() {
                     }
 
                     override fun onResults(results: Bundle?) {
-                        val text = results
+                        val candidates = results
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                            ?.firstOrNull()
                             .orEmpty()
-                            .trim()
+                        val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab)
                         val trailing = text.ifEmpty { latestAndroidPartial.trim() }
                         latestAndroidPartial = ""
                         activeSegmentDeferred?.complete(trailing to null)

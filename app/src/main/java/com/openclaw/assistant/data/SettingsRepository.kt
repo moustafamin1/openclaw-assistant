@@ -369,6 +369,10 @@ class SettingsRepository(context: Context) {
         }
         set(value) = prefs.edit().putString(KEY_TICKTICK_SPEECH_ENGINE, value).apply()
 
+    var tickTickMultiLangSwitch: Boolean
+        get() = prefs.getBoolean(KEY_TICKTICK_MULTI_LANG_SWITCH, false)
+        set(value) = prefs.edit().putBoolean(KEY_TICKTICK_MULTI_LANG_SWITCH, value).apply()
+
     var tickTickCustomVocabulary: String
         get() = prefs.getString(
             KEY_TICKTICK_CUSTOM_VOCABULARY,
@@ -525,6 +529,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_TICKTICK_GLOSSARY_WEEKLY_ENABLED = "ticktick_glossary_weekly_enabled"
         private const val KEY_TICKTICK_GLOSSARY_LAST_SYNC_AT = "ticktick_glossary_last_sync_at"
         private const val KEY_TICKTICK_GLOSSARY_LAST_STATUS = "ticktick_glossary_last_status"
+        private const val KEY_TICKTICK_MULTI_LANG_SWITCH = "ticktick_multi_lang_switch"
 
         const val DEFAULT_GLOSSARY_PRIMARY_URL = "http://192.168.178.24:8642/glossary.json"
         const val DEFAULT_GLOSSARY_FALLBACK_URL =

@@ -45,8 +45,8 @@ object TranscriptNormalizer {
         Quartiersweg = quartiers weg, quarters way
         Wohnpark Südkreuz = wohnpark sudkreuz, wohnpark suedkreuz
         Wohnpark
-        Südkreuz = sudkreuz, suedkreuz, sud kreuz, sued kreuz, sid kreuz
-        Schöneberg = schoenberg, schoeneberg, shoneberg, schoen berg, shone berg
+        Südkreuz = sudkreuz, suedkreuz, sud kreuz, sued kreuz, sid kreuz, sweet cross, suit cross, sweet cruise, suit cruise, sud cross, sued cross
+        Schöneberg = schoenberg, schoeneberg, schonberg, shownberg, shoneberg, show number
         Bildungszeit = bildungs zeit
         Weiterbildungsbudget
         Gasthörer = gasthorer
@@ -56,6 +56,18 @@ object TranscriptNormalizer {
         LUNOS = lunos
         Levothyroxine = levo thyroxine
         ROS2
+        OKRs = okay ours, okey ours, ok ours, oh kay ours, oh kay ares, ok ares, ok r's, ok rs, okey rs, okay rs, o k r s, okay are, okey are, okr
+        TK = tkmax, tk max, t k, tee kay
+        KPIs = k p i s, kpi, kay pee eyes, keep eyes
+        Evals = e vals, i vals, evils, eval
+        APK = a p k, ay pee kay
+        API = a p i, ay pee eye
+        MVP = m v p, em vee pee
+        Grafana
+        BigQuery
+        Azab
+        Tarek
+        Asmaa
     """.trimIndent()
 
     fun parseVocabulary(rawConfig: String): DomainLexicon {
@@ -266,19 +278,62 @@ object TranscriptNormalizer {
     }
 
     /**
+     * Picks the best recognition hypothesis from SpeechRecognizer's N-best list by
+     * favoring hypotheses that contain canonical domain terms/acronyms directly.
+     * Falls back to the top hypothesis while preserving rank tie-breaking.
+     */
+    fun selectBestHypothesis(
+        hypotheses: List<String>,
+        customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY,
+    ): String {
+        val cleaned = hypotheses.map { it.trim() }.filter { it.isNotEmpty() }
+        if (cleaned.isEmpty()) return ""
+        if (cleaned.size == 1) return cleaned.first()
+
+        val merged = mergeGlossaries(DEFAULT_RAW_VOCABULARY, customVocabularyRaw)
+        val lexicon = parseVocabulary(merged)
+        val terms = lexicon.terms.map { it.trim() }.filter { it.length >= 2 }
+
+        var bestCandidate = cleaned.first()
+        var bestScore = Int.MIN_VALUE
+
+        cleaned.forEachIndexed { rankIndex, candidate ->
+            var score = (cleaned.size - rankIndex) * 2 // small prior for higher-confidence rank
+            val lower = candidate.lowercase(Locale.ROOT)
+            for (term in terms) {
+                val termLower = term.lowercase(Locale.ROOT)
+                val regex = Regex("""(?<![A-Za-z0-9])${Regex.escape(termLower)}(?![A-Za-z0-9])""")
+                if (regex.containsMatchIn(lower)) {
+                    score += if (term.any { it.isUpperCase() } && term.length <= 6) 10 else 6
+                }
+                val exactRegex = Regex("""(?<![A-Za-z0-9])${Regex.escape(term)}(?![A-Za-z0-9])""")
+                if (exactRegex.containsMatchIn(candidate)) {
+                    score += 4
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score
+                bestCandidate = candidate
+            }
+        }
+        return bestCandidate
+    }
+
+    /**
      * Returns prioritized canonical terms to pass to Android's on-device speech recognizer
      * (`RecognizerIntent.EXTRA_BIASING_STRINGS`, API 33+).
      */
-    fun biasingTerms(customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY, maxTerms: Int = 80): ArrayList<String> {
+    fun biasingTerms(customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY, maxTerms: Int = 100): ArrayList<String> {
         val merged = mergeGlossaries(DEFAULT_RAW_VOCABULARY, customVocabularyRaw)
         val lexicon = parseVocabulary(merged)
         val ordered = lexicon.terms
             .map { it.trim() }
-            .filter { it.length in 3..48 }
+            .filter { it.length in 2..48 }
             .distinctBy { it.lowercase(Locale.ROOT) }
             .sortedWith(
                 compareByDescending<String> { term ->
                     var score = 0
+                    if (Regex("^[A-Z]{2,}s?[0-9]*$").matches(term)) score += 6
                     if (term.any { it in "äöüßÄÖÜ" }) score += 4
                     if (term.contains(' ')) score += 2
                     if (term.any { it.isUpperCase() }) score += 1
