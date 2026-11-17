@@ -35,7 +35,6 @@ import androidx.core.content.ContextCompat
 import com.openclaw.assistant.R
 import com.openclaw.assistant.SettingsActivity
 import com.openclaw.assistant.data.SettingsRepository
-import com.openclaw.assistant.speech.SherpaWhisperEngine
 import com.openclaw.assistant.speech.VoskModelLoader
 import com.openclaw.assistant.ticktick.CaptureSaveOutcome
 import com.openclaw.assistant.ticktick.OnDeviceLanguageSupport
@@ -158,13 +157,12 @@ class TickTickVoiceCaptureService : Service() {
                 val transcript = when {
                     useAndroidOnDevice -> {
                         captureWithAndroidOnDeviceStt() ?: if (isRecording.get() && !captureCancelled) {
-                            captureWithWhisperOnnx()
+                            captureWithVosk()
                         } else {
                             ""
                         }
                     }
-                    settings.tickTickSpeechEngine == SettingsRepository.TICKTICK_ENGINE_VOSK -> captureWithVosk()
-                    else -> captureWithWhisperOnnx()
+                    else -> captureWithVosk()
                 }
                 handleTranscriptResult(transcript, cancelled = captureCancelled)
             } finally {
@@ -223,22 +221,6 @@ class TickTickVoiceCaptureService : Service() {
                 playBeep(ToneGenerator.TONE_PROP_BEEP)
             }
         }
-    }
-
-    private suspend fun captureWithWhisperOnnx(): String = withContext(Dispatchers.IO) {
-        val modelWarmup = async(Dispatchers.IO) {
-            SherpaWhisperEngine.getOrInit(this@TickTickVoiceCaptureService)
-        }
-        val pcmChunks = recordPcmChunks()
-        withContext(NonCancellable + Dispatchers.Main) {
-            releaseMicAndForegroundUi()
-        }
-        if (pcmChunks.isEmpty() || captureCancelled) {
-            modelWarmup.cancel()
-            return@withContext ""
-        }
-        modelWarmup.await()
-        SherpaWhisperEngine.transcribePcm16(this@TickTickVoiceCaptureService, pcmChunks)
     }
 
     private suspend fun captureWithVosk(): String = withContext(Dispatchers.IO) {
@@ -349,49 +331,6 @@ class TickTickVoiceCaptureService : Service() {
         }
     }
 
-    private fun recordPcmChunks(): List<ByteArray> {
-        val bufferSize = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        ).coerceAtLeast(READ_CHUNK_BYTES * 2)
-
-        val audioRecord = openAudioRecordWithRetry(bufferSize)
-        if (audioRecord == null) {
-            Log.e(TAG, "Unable to open AudioRecord")
-            return emptyList()
-        }
-
-        val chunks = mutableListOf<ByteArray>()
-        val readBuffer = ByteArray(READ_CHUNK_BYTES)
-        try {
-            synchronized(audioRecordLock) {
-                activeAudioRecord = audioRecord
-            }
-            audioRecord.startRecording()
-            notifyMicStarted()
-            while (isRecording.get()) {
-                val read = audioRecord.read(readBuffer, 0, readBuffer.size)
-                if (read > 0) {
-                    chunks.add(readBuffer.copyOf(read))
-                } else if (read < 0) {
-                    break
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "AudioRecord capture error", e)
-        } finally {
-            synchronized(audioRecordLock) {
-                if (activeAudioRecord === audioRecord) {
-                    activeAudioRecord = null
-                }
-            }
-            runCatching { audioRecord.stop() }
-            runCatching { audioRecord.release() }
-        }
-        return chunks
-    }
-
     private fun stopActiveAudioRecord() {
         synchronized(audioRecordLock) {
             runCatching { activeAudioRecord?.stop() }
@@ -437,7 +376,7 @@ class TickTickVoiceCaptureService : Service() {
 
         val sessionSegments = java.util.Collections.synchronizedList(mutableListOf<String>())
         val startedNotified = AtomicBoolean(false)
-        var shouldFallbackToWhisper = false
+        var shouldFallbackToVosk = false
 
         val language = settings.speechLanguage.takeIf { it.isNotBlank() }
             ?: Locale.getDefault().toLanguageTag()
@@ -582,7 +521,7 @@ class TickTickVoiceCaptureService : Service() {
                             sessionSegments.isEmpty())
                     )
                 if (isFatalStartupError) {
-                    shouldFallbackToWhisper = true
+                    shouldFallbackToVosk = true
                     break
                 }
 
@@ -599,13 +538,13 @@ class TickTickVoiceCaptureService : Service() {
             activeSegmentDeferred = null
             withContext(NonCancellable + Dispatchers.Main) {
                 cleanupAndroidRecognizer()
-                if (!shouldFallbackToWhisper) {
+                if (!shouldFallbackToVosk) {
                     releaseMicAndForegroundUi()
                 }
             }
         }
 
-        return if (shouldFallbackToWhisper) {
+        return if (shouldFallbackToVosk) {
             null
         } else {
             sessionSegments.joinToString(" ").trim()

@@ -203,9 +203,6 @@ dependencies {
 
     // Vosk
     implementation("com.alphacephei:vosk-android:0.3.75")
-
-    // Sherpa-ONNX (Offline Whisper base.en for high-accuracy screen-off capture)
-    implementation(files("libs/sherpa-onnx-2.0.1.aar"))
     
     // VOICEVOX (full flavor only)
     // libvoicevox_onnxruntime.so (VoiceVox custom ORT v1.17.3) is bundled in

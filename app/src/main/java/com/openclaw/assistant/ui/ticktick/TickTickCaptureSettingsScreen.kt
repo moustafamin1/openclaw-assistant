@@ -451,20 +451,12 @@ fun TickTickCaptureSettingsContent(
                         },
                     )
                     FilterChip(
-                        selected = speechEngine == SettingsRepository.TICKTICK_ENGINE_WHISPER_ONNX,
-                        onClick = {
-                            speechEngine = SettingsRepository.TICKTICK_ENGINE_WHISPER_ONNX
-                            settings.tickTickSpeechEngine = SettingsRepository.TICKTICK_ENGINE_WHISPER_ONNX
-                        },
-                        label = { Text("Whisper Base.en (Offline Fallback)") },
-                    )
-                    FilterChip(
                         selected = speechEngine == SettingsRepository.TICKTICK_ENGINE_VOSK,
                         onClick = {
                             speechEngine = SettingsRepository.TICKTICK_ENGINE_VOSK
                             settings.tickTickSpeechEngine = SettingsRepository.TICKTICK_ENGINE_VOSK
                         },
-                        label = { Text("Vosk Offline (Fast)") },
+                        label = { Text("Vosk Offline (Fallback)") },
                     )
                 }
 

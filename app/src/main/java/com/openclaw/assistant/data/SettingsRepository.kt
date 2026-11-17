@@ -362,8 +362,11 @@ class SettingsRepository(context: Context) {
         set(value) = prefs.edit().putLong(KEY_TICKTICK_HOLD_THRESHOLD_MS, value.coerceIn(200L, 1200L)).apply()
 
     var tickTickSpeechEngine: String
-        get() = prefs.getString(KEY_TICKTICK_SPEECH_ENGINE, TICKTICK_ENGINE_ANDROID_ON_DEVICE)
-            ?: TICKTICK_ENGINE_ANDROID_ON_DEVICE
+        get() {
+            val saved = prefs.getString(KEY_TICKTICK_SPEECH_ENGINE, TICKTICK_ENGINE_ANDROID_ON_DEVICE)
+                ?: TICKTICK_ENGINE_ANDROID_ON_DEVICE
+            return if (saved == TICKTICK_ENGINE_WHISPER_ONNX) TICKTICK_ENGINE_ANDROID_ON_DEVICE else saved
+        }
         set(value) = prefs.edit().putString(KEY_TICKTICK_SPEECH_ENGINE, value).apply()
 
     var tickTickCustomVocabulary: String
