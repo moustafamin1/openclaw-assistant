@@ -322,4 +322,33 @@ class VolumeCaptureKeyHandlerTest {
         assertEquals(VolumeCaptureKeyHandler.State.IDLE, handler.currentState())
         assertEquals(emptyList<Boolean>(), stopCancels)
     }
+
+    @Test
+    fun nonZeroRepeatCountWhileIdleStillStartsHoldCapture() {
+        val timers = mutableListOf<FakeTimer>()
+        val startedKeys = mutableListOf<Int>()
+        val handler = VolumeCaptureKeyHandler(
+            scheduleHoldTimeout = { _, action -> FakeTimer(action).also { timers += it } },
+            onReplayVolumeTap = {},
+            onStartCapture = { startedKeys += it },
+            onStopCapture = {},
+        )
+
+        assertTrue(
+            handler.handleKeyEvent(
+                keyCode = KeyEvent.KEYCODE_VOLUME_UP,
+                action = KeyEvent.ACTION_DOWN,
+                repeatCount = 1,
+                isCanceled = false,
+                enabled = true,
+                triggerMode = VolumeTriggerMode.VOLUME_UP,
+                holdThresholdMs = 400L,
+                isInCallOrRinging = false,
+            ),
+        )
+        assertEquals(VolumeCaptureKeyHandler.State.PENDING_HOLD, handler.currentState())
+        timers[0].fire()
+        assertEquals(VolumeCaptureKeyHandler.State.CAPTURING, handler.currentState())
+        assertEquals(listOf(KeyEvent.KEYCODE_VOLUME_UP), startedKeys)
+    }
 }

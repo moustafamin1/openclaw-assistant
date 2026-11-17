@@ -140,4 +140,28 @@ class ScreenOffVolumeKeyBridgeTest {
         assertFalse(tracker.isCapturing())
         assertEquals(listOf("start:${KeyEvent.KEYCODE_VOLUME_DOWN}", "stop:false"), events)
     }
+
+    @Test
+    fun syncExternalStopClearsCapturingWithoutFiringOnStopCapture() {
+        val events = mutableListOf<String>()
+        val tracker = ScreenOffVolumeLongPressTracker(
+            onStartCapture = { events += "start:$it" },
+            onStopCapture = { events += "stop:$it" },
+        )
+
+        tracker.handleKeyEvent(
+            keyCode = KeyEvent.KEYCODE_VOLUME_UP,
+            action = KeyEvent.ACTION_DOWN,
+            isCanceled = false,
+            isInteractive = false,
+            enabled = true,
+            triggerMode = VolumeTriggerMode.VOLUME_UP,
+            isInCallOrRinging = false,
+        )
+        assertTrue(tracker.isCapturing())
+
+        tracker.syncExternalStop()
+        assertFalse(tracker.isCapturing())
+        assertEquals(listOf("start:${KeyEvent.KEYCODE_VOLUME_UP}"), events)
+    }
 }

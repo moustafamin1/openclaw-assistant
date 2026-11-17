@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -57,6 +58,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -135,9 +139,11 @@ fun TickTickCaptureSettingsContent(
         micGranted = granted
     }
 
-    val accessibilityRunning = AgentVoiceAccessibilityService.isRunning()
+    var accessibilityRunning by remember { mutableStateOf(AgentVoiceAccessibilityService.isRunning()) }
     val powerManager = context.getSystemService(PowerManager::class.java)
-    val batteryUnrestricted = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+    var batteryUnrestricted by remember {
+        mutableStateOf(powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true)
+    }
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var fullScreenIntentGranted by remember {
         mutableStateOf(TickTickLockCaptureActivity.canUseFullScreenIntent(context))
@@ -146,6 +152,24 @@ fun TickTickCaptureSettingsContent(
         mutableStateOf(ScreenOffVolumeKeyBridge.hasPermission(context))
     }
     var showAdbGuide by remember { mutableStateOf(false) }
+    var keyDiagnostic by remember { mutableStateOf(AgentVoiceAccessibilityService.lastVolumeDiagnostic) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                accessibilityRunning = AgentVoiceAccessibilityService.isRunning()
+                batteryUnrestricted = powerManager?.isIgnoringBatteryOptimizations(context.packageName) == true
+                overlayGranted = Settings.canDrawOverlays(context)
+                fullScreenIntentGranted = TickTickLockCaptureActivity.canUseFullScreenIntent(context)
+                screenOffVolumeGranted = ScreenOffVolumeKeyBridge.hasPermission(context)
+                keyDiagnostic = AgentVoiceAccessibilityService.lastVolumeDiagnostic
+                ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val pendingTasks by repository.observePendingTasks().collectAsState(initial = emptyList())
 
@@ -334,7 +358,7 @@ fun TickTickCaptureSettingsContent(
                         onCheckedChange = {
                             enabled = it
                             settings.tickTickCaptureEnabled = it
-                            ScreenOffVolumeKeyBridge.syncRegistration(context)
+                            ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
                         },
                     )
                 }
@@ -356,9 +380,31 @@ fun TickTickCaptureSettingsContent(
                             onClick = {
                                 triggerMode = value
                                 settings.tickTickVolumeTrigger = value
+                                ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
                             },
                             label = { Text(label) },
                         )
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "Last key event: $keyDiagnostic",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(
+                        onClick = {
+                            keyDiagnostic = AgentVoiceAccessibilityService.lastVolumeDiagnostic
+                            ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
+                        },
+                    ) {
+                        Text("Refresh")
                     }
                 }
 

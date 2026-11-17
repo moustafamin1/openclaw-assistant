@@ -86,6 +86,10 @@ class ScreenOffVolumeLongPressTracker(
             onStopCapture(cancel)
         }
     }
+
+    fun syncExternalStop() {
+        capturingKeyCode = KeyEvent.KEYCODE_UNKNOWN
+    }
 }
 
 /**
@@ -122,7 +126,7 @@ object ScreenOffVolumeKeyBridge {
         "pm grant ${context.packageName} $PERMISSION_SET_VOLUME_KEY_LONG_PRESS_LISTENER"
 
     @SuppressLint("PrivateApi")
-    fun syncRegistration(context: Context): Boolean {
+    fun syncRegistration(context: Context, force: Boolean = false): Boolean {
         val appContext = context.applicationContext
         val settings = SettingsRepository.getInstance(appContext)
         if (!settings.tickTickCaptureEnabled || !hasPermission(appContext)) {
@@ -131,7 +135,7 @@ object ScreenOffVolumeKeyBridge {
         }
 
         synchronized(lock) {
-            if (registered && registeredAppContext === appContext) {
+            if (!force && registered && registeredAppContext === appContext) {
                 return true
             }
             return runCatching {
@@ -209,6 +213,11 @@ object ScreenOffVolumeKeyBridge {
 
     fun isCapturing(): Boolean = tracker?.isCapturing() == true
 
+    fun syncExternalStop() {
+        cancelMaxDurationStop()
+        tracker?.syncExternalStop()
+    }
+
     fun stopActiveCapture(cancel: Boolean = false) {
         cancelMaxDurationStop()
         val activeTracker = tracker
@@ -256,8 +265,7 @@ object ScreenOffVolumeKeyBridge {
         val am = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val mode = am?.mode ?: AudioManager.MODE_NORMAL
         val inCall = mode == AudioManager.MODE_RINGTONE ||
-            mode == AudioManager.MODE_IN_CALL ||
-            mode == AudioManager.MODE_IN_COMMUNICATION
+            mode == AudioManager.MODE_IN_CALL
 
         val triggerMode = VolumeTriggerMode.fromPref(settings.tickTickVolumeTrigger)
         val handled = activeTracker.handleKeyEvent(
@@ -286,9 +294,9 @@ object ScreenOffVolumeKeyBridge {
         val a11yService = AgentVoiceAccessibilityService.get()
         if (a11yService != null) {
             // Bound AccessibilityService holds SYSTEM_ALLOW_LISTED WIU permission on Android 14+;
-            // start capture headlessly with zero lockscreen popup or screen wake.
-            Log.i(TAG, "Screen-off capture started directly via AccessibilityService allowance")
-            TickTickVoiceCaptureService.startCapture(appContext)
+            // start capture via service context (with lockscreen fallback enabled via setHoldActive).
+            Log.i(TAG, "Screen-off capture started via AccessibilityService context")
+            TickTickVoiceCaptureService.startCapture(a11yService)
             return
         }
 

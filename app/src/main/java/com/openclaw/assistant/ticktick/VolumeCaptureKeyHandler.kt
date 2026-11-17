@@ -82,7 +82,7 @@ class VolumeCaptureKeyHandler(
                     state = State.IDLE
                     activeKeyCode = KeyEvent.KEYCODE_UNKNOWN
                 }
-                if (state == State.IDLE && repeatCount == 0) {
+                if (state == State.IDLE) {
                     state = State.PENDING_HOLD
                     activeKeyCode = keyCode
                     holdTimer?.cancel()

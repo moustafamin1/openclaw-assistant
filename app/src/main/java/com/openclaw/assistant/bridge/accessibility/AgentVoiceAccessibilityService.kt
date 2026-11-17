@@ -22,6 +22,7 @@ import com.openclaw.assistant.service.TickTickVoiceCaptureService
 import com.openclaw.assistant.ticktick.ScreenOffVolumeKeyBridge
 import com.openclaw.assistant.ticktick.VolumeCaptureKeyHandler
 import com.openclaw.assistant.ticktick.VolumeTriggerMode
+import com.openclaw.assistant.ui.ticktick.TickTickLockCaptureActivity
 import java.security.MessageDigest
 
 /**
@@ -49,6 +50,8 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != TickTickVoiceCaptureService.ACTION_CAPTURE_FINISHED) return
             volumeKeyHandler.syncExternalStop()
+            ScreenOffVolumeKeyBridge.syncExternalStop()
+            TickTickLockCaptureActivity.setHoldActive(false)
             releaseHoldDisplayWakeLock()
         }
     }
@@ -63,13 +66,17 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
             onReplayVolumeTap = { keyCode -> replayVolumeStep(keyCode) },
             onStartCapture = {
                 android.util.Log.i("AgentVoiceA11y", "Volume capture start via accessibility")
+                lastVolumeDiagnostic = "Started capture via Accessibility"
+                TickTickLockCaptureActivity.setHoldActive(true)
                 acquireHoldDisplayWakeLock()
-                TickTickVoiceCaptureService.startCapture(applicationContext)
+                TickTickVoiceCaptureService.startCapture(this@AgentVoiceAccessibilityService)
             },
             onStopCapture = { cancel ->
                 android.util.Log.i("AgentVoiceA11y", "Volume capture stop via accessibility (cancel=$cancel)")
+                lastVolumeDiagnostic = "Stopped capture (cancel=$cancel)"
+                TickTickLockCaptureActivity.setHoldActive(false)
                 releaseHoldDisplayWakeLock()
-                TickTickVoiceCaptureService.stopCapture(applicationContext, cancel)
+                TickTickVoiceCaptureService.stopCapture(this@AgentVoiceAccessibilityService, cancel)
             },
         )
     }
@@ -77,6 +84,7 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        lastVolumeDiagnostic = "Accessibility connected"
         if (!captureFinishedReceiverRegistered) {
             runCatching {
                 ContextCompat.registerReceiver(
@@ -88,7 +96,7 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
                 captureFinishedReceiverRegistered = true
             }
         }
-        ScreenOffVolumeKeyBridge.syncRegistration(applicationContext)
+        ScreenOffVolumeKeyBridge.syncRegistration(applicationContext, force = true)
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -116,10 +124,19 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
 
     override fun onKeyEvent(event: KeyEvent?): Boolean {
         if (event == null) return false
+        val isVolKey = event.keyCode == KeyEvent.KEYCODE_VOLUME_UP || event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
         val settings = SettingsRepository.getInstance(applicationContext)
-        if (!settings.tickTickCaptureEnabled) return false
+        if (!settings.tickTickCaptureEnabled) {
+            if (isVolKey) lastVolumeDiagnostic = "Ignored key=${event.keyCode}: capture disabled"
+            return false
+        }
 
         val triggerMode = VolumeTriggerMode.fromPref(settings.tickTickVolumeTrigger)
+        if (ScreenOffVolumeKeyBridge.isCapturing() && !TickTickVoiceCaptureService.isCapturing()) {
+            // Clear stale off-screen tracker if service already ended before ACTION_UP arrived.
+            ScreenOffVolumeKeyBridge.syncExternalStop()
+            TickTickLockCaptureActivity.setHoldActive(false)
+        }
         if (ScreenOffVolumeKeyBridge.isCapturing() && triggerMode.matchesKeyCode(event.keyCode)) {
             if (event.action == KeyEvent.ACTION_UP) {
                 ScreenOffVolumeKeyBridge.stopActiveCapture(
@@ -132,8 +149,12 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         val mode = audioManager?.mode ?: AudioManager.MODE_NORMAL
         val inCallOrRinging = mode == AudioManager.MODE_RINGTONE ||
-            mode == AudioManager.MODE_IN_CALL ||
-            mode == AudioManager.MODE_IN_COMMUNICATION
+            mode == AudioManager.MODE_IN_CALL
+
+        if (isVolKey && event.action == KeyEvent.ACTION_DOWN) {
+            val keyLabel = if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) "VOL_UP" else "VOL_DOWN"
+            lastVolumeDiagnostic = "Key $keyLabel | mode=${triggerMode.prefValue} | call=$inCallOrRinging"
+        }
 
         return volumeKeyHandler.handleKeyEvent(
             keyCode = event.keyCode,
@@ -255,6 +276,8 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
 
     companion object {
         @Volatile private var instance: AgentVoiceAccessibilityService? = null
+        @Volatile var lastVolumeDiagnostic: String = "No volume events observed yet"
+            private set
         fun get(): AgentVoiceAccessibilityService? = instance
         fun isRunning(): Boolean = instance != null
     }
