@@ -147,10 +147,15 @@ object TranscriptNormalizer {
             "!",
         )
 
-        // 1b. Hesitation filler cleanup (WisprFlow style)
+        // 1b. Hesitation filler & verbal self-correction cleanup (WisprFlow style)
         text = text.replace(
             Regex("""(?:^|\s)\b(?:u+m+|u+h+|e+r+m*|h+m+m*|ä+h+m?)\b[,.]*(?=\s|$)""", RegexOption.IGNORE_CASE),
             " ",
+        )
+        // Strip immediate verbal self-corrections ("tkmax I mean tk" -> "tk", "Friday, I mean Monday" -> "Monday")
+        text = text.replace(
+            Regex("""\b[A-Za-zÄÖÜäöüß0-9_-]+[,]?\s+\b(?:i\s+mean|sorry\s+no|no\s+wait|actually\s+no)\b[,]?\s+""", RegexOption.IGNORE_CASE),
+            "",
         )
         text = text.trim().replace(Regex("\\s+"), " ")
 
@@ -182,9 +187,15 @@ object TranscriptNormalizer {
             "$1",
         )
 
-        // 3. Token-level alias & phonetic fuzzy replacement
+        // 3. Multi-word phonetic sliding window (2-3 words) -> compound/multi-word glossary terms
         val singleWordTerms = lexicon.terms.filter { !it.contains(' ') }
-        val tokens = text.split(' ').toMutableList()
+        val multiWordTerms = lexicon.terms.filter { it.contains(' ') }
+        val compoundSingleTerms = singleWordTerms.filter { it.length >= 7 }
+        val tokens = applyMultiWordPhoneticWindow(
+            tokens = text.split(' '),
+            multiWordTerms = multiWordTerms,
+            compoundSingleTerms = compoundSingleTerms,
+        ).toMutableList()
 
         for (i in tokens.indices) {
             val token = tokens[i]
@@ -344,6 +355,98 @@ object TranscriptNormalizer {
         return ArrayList(ordered)
     }
 
+    private fun applyMultiWordPhoneticWindow(
+        tokens: List<String>,
+        multiWordTerms: List<String>,
+        compoundSingleTerms: List<String>,
+    ): List<String> {
+        if (tokens.size < 2 || (multiWordTerms.isEmpty() && compoundSingleTerms.isEmpty())) return tokens
+        val out = mutableListOf<String>()
+        var i = 0
+        while (i < tokens.size) {
+            var matched = false
+            for (winSize in listOf(3, 2)) {
+                if (i + winSize > tokens.size) continue
+                val slice = tokens.subList(i, i + winSize)
+                val firstLead = slice.first().takeWhile { it == '#' || it == '@' || it == '"' || it == '(' }
+                val lastTrail = slice.last().takeLastWhile { it in setOf('.', ',', '!', '?', ':', ';', '"', ')') }
+                val cores = slice.mapIndexed { idx, tok ->
+                    val lead = if (idx == 0) firstLead else ""
+                    val trail = if (idx == slice.lastIndex) lastTrail else ""
+                    val end = (tok.length - trail.length).coerceAtLeast(lead.length)
+                    tok.substring(lead.length, end)
+                }
+                val validWindow = cores.all { c ->
+                    c.isNotEmpty() &&
+                        c.any { ch -> ch in 'A'..'Z' || ch in 'a'..'z' || ch in "äöüßÄÖÜ" } &&
+                        !c.startsWith("@") &&
+                        !c.startsWith("#") &&
+                        c.lowercase(Locale.ROOT) !in COMMON_STOP_WORDS &&
+                        c.lowercase(Locale.ROOT) !in WINDOW_STOP_WORDS
+                }
+                if (!validWindow) continue
+
+                val spacedPhrase = cores.joinToString(" ").lowercase(Locale.ROOT)
+                val joinedPhrase = cores.joinToString("").lowercase(Locale.ROOT)
+
+                // If the leading 2 tokens already form an exact canonical multi-word term, don't swallow a 3rd word.
+                if (winSize == 3 && cores.size >= 2) {
+                    val prefix2 = "${cores[0]} ${cores[1]}"
+                    if (multiWordTerms.any { it.equals(prefix2, ignoreCase = true) }) continue
+                }
+                if (multiWordTerms.any { it.equals(spacedPhrase, ignoreCase = true) }) {
+                    out += slice
+                    i += winSize
+                    matched = true
+                    break
+                }
+
+                val sameWordCountMulti = multiWordTerms.filter { it.split(' ').size == winSize }
+                val multiThreshold = if (spacedPhrase.length >= 10) 0.68 else 0.76
+                val multiMatch = findBestWindowMatch(spacedPhrase, sameWordCountMulti, threshold = multiThreshold)
+                val compoundMatch = if (multiMatch == null && winSize == 2) {
+                    findBestWindowMatch(joinedPhrase, compoundSingleTerms, threshold = 0.80)
+                } else {
+                    null
+                }
+                val winner = multiMatch ?: compoundMatch
+                if (winner != null) {
+                    out += "$firstLead$winner$lastTrail"
+                    i += winSize
+                    matched = true
+                    break
+                }
+            }
+            if (!matched) {
+                out += tokens[i]
+                i++
+            }
+        }
+        return out
+    }
+
+    private fun findBestWindowMatch(
+        phrase: String,
+        candidates: List<String>,
+        threshold: Double,
+    ): String? {
+        val folded = foldGermanUmlauts(phrase)
+        val skeleton = consonantSkeleton(folded)
+        var best: String? = null
+        var bestScore = 0.0
+        for (candidate in candidates) {
+            val candFolded = foldGermanUmlauts(candidate.lowercase(Locale.ROOT))
+            val sim = normalizedSimilarity(folded, candFolded)
+            val skelSim = normalizedSimilarity(skeleton, consonantSkeleton(candFolded))
+            val combined = sim * 0.65 + skelSim * 0.35
+            if (combined >= threshold && combined > bestScore) {
+                bestScore = combined
+                best = candidate
+            }
+        }
+        return best
+    }
+
     private fun findBestPhoneticMatch(
         word: String,
         candidates: List<String>,
@@ -378,6 +481,7 @@ object TranscriptNormalizer {
 
     internal fun consonantSkeleton(s: String): String {
         val lower = foldGermanUmlauts(s)
+            .replace(Regex("c([eiy])"), "s$1")
             .replace("sch", "sh")
             .replace("ph", "f")
             .replace("gh", "g")
@@ -426,5 +530,11 @@ object TranscriptNormalizer {
         "please", "update", "those", "these", "there", "their", "about", "tomorrow",
         "today", "reminder", "remind", "experiments", "experiment", "project", "create",
         "check", "review", "meeting", "schedule", "around", "something", "research",
+    )
+    private val WINDOW_STOP_WORDS = setOf(
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "do", "for", "from",
+        "get", "go", "have", "he", "her", "his", "i", "if", "in", "is", "it", "me",
+        "my", "no", "not", "of", "on", "or", "our", "out", "she", "so", "that", "the",
+        "this", "to", "up", "us", "we", "will", "with", "you", "your",
     )
 }

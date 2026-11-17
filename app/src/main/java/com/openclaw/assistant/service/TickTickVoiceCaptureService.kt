@@ -189,9 +189,9 @@ class TickTickVoiceCaptureService : Service() {
             return
         }
         activeRecording.set(false)
-        stopActiveAudioRecord()
 
         if (cancel) {
+            stopActiveAudioRecord()
             captureJob?.cancel()
             cleanupAndroidRecognizer()
             triggerHaptic(CANCEL_HAPTIC_TIMINGS, CANCEL_HAPTIC_AMPLITUDES)
@@ -201,15 +201,17 @@ class TickTickVoiceCaptureService : Service() {
             return
         }
 
-        triggerHaptic(STOP_HAPTIC_TIMINGS, STOP_HAPTIC_AMPLITUDES)
-        if (settings.tickTickAudioCue) {
-            playBeep(ToneGenerator.TONE_PROP_ACK)
-        }
+        // Flush 380ms of trailing audio before stopping STT/AudioRecord and playing ACK beep
+        // so final syllables aren't clipped and the stop beep never leaks into the open mic.
         scope.launch(Dispatchers.Main) {
-            // Brief 160ms tail flush so trailing syllables at release aren't clipped.
-            delay(160L)
+            delay(380L)
             if (!captureCancelled) {
+                stopActiveAudioRecord()
                 runCatching { androidRecognizer?.stopListening() }
+                triggerHaptic(STOP_HAPTIC_TIMINGS, STOP_HAPTIC_AMPLITUDES)
+                if (settings.tickTickAudioCue) {
+                    playBeep(ToneGenerator.TONE_PROP_ACK)
+                }
             }
         }
     }
@@ -506,7 +508,7 @@ class TickTickVoiceCaptureService : Service() {
                     delay(50L)
                 }
 
-                val (tailText, segErr) = withTimeoutOrNull(2200L) { segDone.await() }
+                val (tailText, segErr) = withTimeoutOrNull(2600L) { segDone.await() }
                     ?: (latestAndroidPartial.trim() to null)
                 activeSegmentDeferred = null
 
@@ -564,6 +566,9 @@ class TickTickVoiceCaptureService : Service() {
 
         when (val outcome = repository.enqueueAndSync(transcript)) {
             is CaptureSaveOutcome.Synced -> {
+                if (outcome.taskId.isNotBlank()) {
+                    triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
+                }
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_saved_title),
                     body = outcome.title,
@@ -571,6 +576,7 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             is CaptureSaveOutcome.QueuedOffline -> {
+                triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_queued_title),
                     body = outcome.title,
@@ -836,6 +842,8 @@ class TickTickVoiceCaptureService : Service() {
         private val START_HAPTIC_AMPLITUDES = intArrayOf(0, 255)
         private val STOP_HAPTIC_TIMINGS = longArrayOf(0L, 30L, 45L, 45L)
         private val STOP_HAPTIC_AMPLITUDES = intArrayOf(0, 255, 0, 255)
+        private val SAVED_HAPTIC_TIMINGS = longArrayOf(0L, 45L, 70L, 140L)
+        private val SAVED_HAPTIC_AMPLITUDES = intArrayOf(0, 180, 0, 255)
         private val CANCEL_HAPTIC_TIMINGS = longArrayOf(0L, 25L, 50L, 25L)
         private val CANCEL_HAPTIC_AMPLITUDES = intArrayOf(0, 200, 0, 200)
         private val ERROR_HAPTIC_TIMINGS = longArrayOf(0L, 60L, 60L, 60L, 60L, 60L)

@@ -128,4 +128,24 @@ class TranscriptNormalizerTest {
         assertTrue(biasing.contains("OKRs"))
         assertTrue(biasing.contains("TK"))
     }
+
+    @Test
+    fun stripsVerbalSelfCorrectionsAndMatchesMultiWordCompoundPhonetics() {
+        assertEquals(
+            "Regarding resolving TK and taxes",
+            TranscriptNormalizer.normalize("regarding resolving tkmax I mean tk and taxes"),
+        )
+        assertEquals(
+            "Move task to Monday",
+            TranscriptNormalizer.normalize("move task to Friday, I mean Monday"),
+        )
+        assertEquals(
+            "Call Yasmine tomorrow",
+            TranscriptNormalizer.normalize("call Maram no wait Yasmine tomorrow"),
+        )
+        assertEquals(
+            "Check Insights Base and Finanzamt",
+            TranscriptNormalizer.normalize("check insight space and finanz amt"),
+        )
+    }
 }
