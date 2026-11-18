@@ -442,6 +442,10 @@ class SettingsRepository(context: Context) {
         get() = prefs.getBoolean(KEY_TICKTICK_STATUS_NOTIFICATIONS, false)
         set(value) = prefs.edit().putBoolean(KEY_TICKTICK_STATUS_NOTIFICATIONS, value).apply()
 
+    var tickTickLastCaptureDiagnostic: String
+        get() = prefs.getString(KEY_TICKTICK_LAST_CAPTURE_DIAG, "No capture yet") ?: "No capture yet"
+        set(value) = prefs.edit().putString(KEY_TICKTICK_LAST_CAPTURE_DIAG, value).apply()
+
     /**
      * Get the chat completions URL.
      * Supports both base URL (http://server) and full path (http://server/v1/chat/completions).
@@ -534,6 +538,7 @@ class SettingsRepository(context: Context) {
         private const val KEY_TICKTICK_GLOSSARY_LAST_SYNC_AT = "ticktick_glossary_last_sync_at"
         private const val KEY_TICKTICK_GLOSSARY_LAST_STATUS = "ticktick_glossary_last_status"
         private const val KEY_TICKTICK_MULTI_LANG_SWITCH = "ticktick_multi_lang_switch"
+        private const val KEY_TICKTICK_LAST_CAPTURE_DIAG = "ticktick_last_capture_diag"
 
         const val DEFAULT_GLOSSARY_PRIMARY_URL = "http://192.168.178.24:8642/glossary.json"
         const val DEFAULT_GLOSSARY_FALLBACK_URL =

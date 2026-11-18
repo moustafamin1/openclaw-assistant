@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 sealed class CaptureSaveOutcome {
     data class Synced(val title: String, val taskId: String) : CaptureSaveOutcome()
@@ -40,10 +41,10 @@ class TickTickCaptureRepository(
 
     fun observePendingCount(): Flow<Int> = dao.observeCount()
 
-    suspend fun enqueueAndSync(rawTranscript: String): CaptureSaveOutcome {
+    suspend fun enqueueAndSync(rawTranscript: String): CaptureSaveOutcome = withContext(Dispatchers.IO) {
         val contextIndex = ContextIndexManager.getIndex(appContext)
         val cleanTitle = cleanTranscript(rawTranscript, settings.effectiveTickTickVocabulary(), contextIndex)
-        if (cleanTitle.isEmpty()) return CaptureSaveOutcome.IgnoredBlank
+        if (cleanTitle.isEmpty()) return@withContext CaptureSaveOutcome.IgnoredBlank
 
         // Reinforce local offline unigram/bigram index immediately upon capture
         ContextIndexManager.recordSentence(appContext, cleanTitle)
@@ -60,10 +61,10 @@ class TickTickCaptureRepository(
         val token = settings.tickTickAccessToken
         if (token.isBlank()) {
             dao.markFailed(rowId, PendingTickTickTaskEntity.STATUS_AUTH_ERROR, "Missing TickTick token")
-            return CaptureSaveOutcome.AuthRequired(cleanTitle, "TickTick token not configured")
+            return@withContext CaptureSaveOutcome.AuthRequired(cleanTitle, "TickTick token not configured")
         }
 
-        return syncSingleRow(rowId, cleanTitle, token)
+        syncSingleRow(rowId, cleanTitle, token)
     }
 
     suspend fun flushPending(): Int = syncMutex.withLock {

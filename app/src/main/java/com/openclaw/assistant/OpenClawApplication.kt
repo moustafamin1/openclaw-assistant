@@ -12,6 +12,9 @@ import com.openclaw.assistant.bridge.BridgeActivityLog
 import com.openclaw.assistant.bridge.WakeLockManager
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.node.NodeRuntime
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.security.Security
 
 class OpenClawApplication : Application() {
@@ -80,6 +83,11 @@ class OpenClawApplication : Application() {
                 com.openclaw.assistant.ticktick.GlossarySyncScheduler.enqueueImmediateCatchUpIfStale(this)
             }
             com.openclaw.assistant.ticktick.ScreenOffVolumeKeyBridge.syncRegistration(this)
+            CoroutineScope(Dispatchers.IO).launch {
+                runCatching {
+                    com.openclaw.assistant.ticktick.ContextIndexManager.getIndex(this@OpenClawApplication)
+                }
+            }
         } catch (e: Throwable) {
             Log.w("OpenClawApp", "Glossary/volume bridge init skipped: ${e.message}")
         }

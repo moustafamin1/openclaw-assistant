@@ -22,6 +22,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -80,6 +81,13 @@ class TickTickVoiceCaptureService : Service() {
     private var androidRecognizer: SpeechRecognizer? = null
     @Volatile private var activeSegmentDeferred: CompletableDeferred<Pair<String, Int?>>? = null
     @Volatile private var latestAndroidPartial: String = ""
+    @Volatile private var lastStopHapticAtMs: Long = 0L
+    private val captureFinishedUnlocked = AtomicBoolean(false)
+
+    private fun setCaptureDiagnostic(value: String) {
+        lastCaptureDiagnostic = value
+        runCatching { settings.tickTickLastCaptureDiagnostic = value }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -146,6 +154,8 @@ class TickTickVoiceCaptureService : Service() {
 
         captureCancelled = false
         micForegroundReleased.set(false)
+        captureFinishedUnlocked.set(false)
+        lastStopHapticAtMs = 0L
         isRecording.set(true)
         activeRecording.set(true)
 
@@ -162,7 +172,7 @@ class TickTickVoiceCaptureService : Service() {
                             googleText
                         } else if (isRecording.get() && !captureCancelled) {
                             val voskText = captureWithVosk()
-                            lastCaptureDiagnostic = "$lastCaptureDiagnostic -> Vosk(fallback) raw=\"$voskText\""
+                            setCaptureDiagnostic("$lastCaptureDiagnostic -> Vosk(fallback) raw=\"$voskText\"")
                             voskText
                         } else {
                             ""
@@ -170,7 +180,7 @@ class TickTickVoiceCaptureService : Service() {
                     }
                     else -> {
                         val voskText = captureWithVosk()
-                        lastCaptureDiagnostic = "Vosk(selected) raw=\"$voskText\""
+                        setCaptureDiagnostic("Vosk(selected) raw=\"$voskText\"")
                         voskText
                     }
                 }
@@ -218,6 +228,7 @@ class TickTickVoiceCaptureService : Service() {
             if (!captureCancelled) {
                 stopActiveAudioRecord()
                 runCatching { androidRecognizer?.stopListening() }
+                lastStopHapticAtMs = SystemClock.elapsedRealtime()
                 triggerHaptic(STOP_HAPTIC_TIMINGS, STOP_HAPTIC_AMPLITUDES)
                 if (settings.tickTickAudioCue) {
                     playBeep(ToneGenerator.TONE_PROP_ACK)
@@ -305,9 +316,9 @@ class TickTickVoiceCaptureService : Service() {
             runCatching { audioRecord.release() }
         }
 
-        // Release mic foreground state right away so Android clears the green mic indicator immediately.
+        // Unlock volume keys & dismiss overlay immediately while staying foreground until save + haptic finish.
         withContext(NonCancellable + Dispatchers.Main) {
-            releaseMicAndForegroundUi()
+            notifyCaptureUiUnlocked()
         }
 
         return@withContext try {
@@ -377,16 +388,6 @@ class TickTickVoiceCaptureService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
 
         val multiLangEnabled = settings.tickTickMultiLangSwitch
-        // Always inspect installed on-device packs once so we pick a valid installed tag (e.g. en-US, not en-DE).
-        if (OnDeviceLanguageSupport.cachedStatus == null) {
-            withTimeoutOrNull(450L) {
-                OnDeviceLanguageSupport.queryAndPrepare(
-                    this@TickTickVoiceCaptureService,
-                    triggerDownloads = multiLangEnabled,
-                )
-            }
-        }
-
         val sessionSegments = java.util.Collections.synchronizedList(mutableListOf<String>())
         val startedNotified = AtomicBoolean(false)
         var shouldFallbackToVosk = false
@@ -401,10 +402,13 @@ class TickTickVoiceCaptureService : Service() {
         } else {
             emptyList()
         }
-        val effectiveVocab = settings.effectiveTickTickVocabulary()
-        val contextIndex = ContextIndexManager.getIndex(applicationContext)
-        // Keep EXTRA_BIASING_STRINGS tight (top 25) so unrelated words never steal beam probability from normal English.
-        val biasingList = TranscriptNormalizer.biasingTerms(effectiveVocab, maxTerms = 25)
+        val (effectiveVocab, contextIndex, biasingList) = withContext(Dispatchers.IO) {
+            val vocab = settings.effectiveTickTickVocabulary()
+            val ctx = ContextIndexManager.getIndex(applicationContext)
+            // Keep EXTRA_BIASING_STRINGS tight (top 25) so unrelated words never steal beam probability from normal English.
+            val biasing = TranscriptNormalizer.biasingTerms(vocab, maxTerms = 25)
+            Triple(vocab, ctx, biasing)
+        }
 
         fun buildRecognizerIntent(targetLang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -588,7 +592,7 @@ class TickTickVoiceCaptureService : Service() {
             withContext(NonCancellable + Dispatchers.Main) {
                 cleanupAndroidRecognizer()
                 if (!shouldFallbackToVosk) {
-                    releaseMicAndForegroundUi()
+                    notifyCaptureUiUnlocked()
                 }
             }
         }
@@ -596,11 +600,12 @@ class TickTickVoiceCaptureService : Service() {
         val finalRaw = sessionSegments.joinToString(" ").trim()
         val nBestPreview = lastRawCandidates.take(3).joinToString(" | ") { "\"$it\"" }
         val errSuffix = lastErrCode?.let { " err=$it" }.orEmpty()
-        lastCaptureDiagnostic = if (shouldFallbackToVosk) {
+        val diag = if (shouldFallbackToVosk) {
             "Google-OnDevice FAILED($language$errSuffix)"
         } else {
             "Google-OnDevice($language, $lastResultMode, bias=${biasingList.size}$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
         }
+        setCaptureDiagnostic(diag)
         Log.i(TAG, "Capture diagnostic: $lastCaptureDiagnostic")
 
         return if (shouldFallbackToVosk) {
@@ -610,14 +615,24 @@ class TickTickVoiceCaptureService : Service() {
         }
     }
 
+    private suspend fun triggerSavedHapticCleanly() {
+        val sinceStop = SystemClock.elapsedRealtime() - lastStopHapticAtMs
+        if (lastStopHapticAtMs > 0L && sinceStop in 0L..220L) {
+            delay(220L - sinceStop)
+        }
+        triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
+        // Keep foreground service alive until the 255ms double-pulse waveform finishes.
+        delay(320L)
+    }
+
     private suspend fun handleTranscriptResult(transcript: String, cancelled: Boolean) {
         if (cancelled) return
 
         when (val outcome = repository.enqueueAndSync(transcript)) {
             is CaptureSaveOutcome.Synced -> {
-                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
+                setCaptureDiagnostic("$lastCaptureDiagnostic -> saved=\"${outcome.title}\"")
                 if (outcome.taskId.isNotBlank()) {
-                    triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
+                    triggerSavedHapticCleanly()
                 }
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_saved_title),
@@ -626,8 +641,8 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             is CaptureSaveOutcome.QueuedOffline -> {
-                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
-                triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
+                setCaptureDiagnostic("$lastCaptureDiagnostic -> saved=\"${outcome.title}\" (offline)")
+                triggerSavedHapticCleanly()
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_queued_title),
                     body = outcome.title,
@@ -635,8 +650,9 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             is CaptureSaveOutcome.AuthRequired -> {
-                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
+                setCaptureDiagnostic("$lastCaptureDiagnostic -> auth-error")
                 triggerHaptic(ERROR_HAPTIC_TIMINGS, ERROR_HAPTIC_AMPLITUDES)
+                delay(360L)
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_auth_title),
                     body = outcome.title,
@@ -644,7 +660,7 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             CaptureSaveOutcome.IgnoredBlank -> {
-                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> blank"
+                setCaptureDiagnostic("$lastCaptureDiagnostic -> blank")
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_blank_title),
                     body = getString(R.string.ticktick_notif_blank_body),
@@ -654,13 +670,18 @@ class TickTickVoiceCaptureService : Service() {
         }
     }
 
-    private fun releaseMicAndForegroundUi() {
+    private fun notifyCaptureUiUnlocked() {
         activeRecording.set(false)
-        if (!micForegroundReleased.compareAndSet(false, true)) return
+        if (!captureFinishedUnlocked.compareAndSet(false, true)) return
         com.openclaw.assistant.ticktick.TickTickOverlayAnchor.hide(this)
         com.openclaw.assistant.ui.ticktick.TickTickLockCaptureActivity.cancelNotification(this)
         sendBroadcast(Intent(ACTION_CAPTURE_FINISHED).setPackage(packageName))
         resumeHotwordIfNeeded()
+    }
+
+    private fun releaseMicAndForegroundUi() {
+        notifyCaptureUiUnlocked()
+        if (!micForegroundReleased.compareAndSet(false, true)) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
