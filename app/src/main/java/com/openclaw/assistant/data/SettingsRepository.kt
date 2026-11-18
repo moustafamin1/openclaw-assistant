@@ -412,9 +412,13 @@ class SettingsRepository(context: Context) {
         set(value) = prefs.edit().putString(KEY_TICKTICK_GLOSSARY_LAST_STATUS, value).apply()
 
     fun effectiveTickTickVocabulary(): String {
+        val withDefaults = com.openclaw.assistant.ticktick.TranscriptNormalizer.mergeGlossaries(
+            syncedRaw = com.openclaw.assistant.ticktick.TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+            userCustomRaw = tickTickCustomVocabulary,
+        )
         return com.openclaw.assistant.ticktick.TranscriptNormalizer.mergeGlossaries(
             syncedRaw = tickTickSyncedGlossary,
-            userCustomRaw = tickTickCustomVocabulary,
+            userCustomRaw = withDefaults,
         )
     }
 

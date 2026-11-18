@@ -147,5 +147,21 @@ class TranscriptNormalizerTest {
             "Check Insights Base and Finanzamt",
             TranscriptNormalizer.normalize("check insight space and finanz amt"),
         )
+        assertEquals(
+            "Read streak specs Noory app",
+            TranscriptNormalizer.normalize("Read streak specs naughty up"),
+        )
+        assertEquals(
+            "Read streak specs Noory",
+            TranscriptNormalizer.normalize("Read streak specs naughty"),
+        )
+        assertEquals(
+            "Fix streak specs Noory app",
+            TranscriptNormalizer.normalize("fix streak specs newry up"),
+        )
+        assertEquals(
+            "Set Noory up on staging",
+            TranscriptNormalizer.normalize("set naughty up on staging"),
+        )
     }
 }

@@ -18,7 +18,8 @@ object TranscriptNormalizer {
     )
 
     val DEFAULT_RAW_VOCABULARY: String = """
-        Noory = naughty, nouri, nuri, nori, no-tee, notee, moo-ree, mooree, moody, noorie, nory, nuori, new re
+        Noory app = naughty app, naughty up, noory up, nouri app, nouri up, nuri app, nuri up, nori app, nori up, newry up, moody app, moody up, new re app, new re up
+        Noory = naughty, nouri, nuri, nori, no-tee, notee, moo-ree, mooree, moody, noorie, nory, nuori, new re, newry, norie, norry, noori, nurie
         Azmy = azmi, asmi, azmee, as me
         Zebeeb = zabib, zabeeb, zebib, the bib, zeeb
         Insights Base = insight base, insights base
@@ -176,7 +177,16 @@ object TranscriptNormalizer {
 
         for ((alias, canonical) in sortedMultiAliases) {
             val pattern = Regex("""(#?)\b${Regex.escape(alias)}\b""", RegexOption.IGNORE_CASE)
+            val endsWithUp = alias.endsWith(" up")
             text = text.replace(pattern) { match ->
+                if (endsWithUp) {
+                    val prevWord = text.substring(0, match.range.first)
+                        .trimEnd()
+                        .substringAfterLast(' ')
+                        .lowercase(Locale.ROOT)
+                        .trimEnd('.', ',', ':', ';', '!', '?')
+                    if (prevWord in PHRASAL_VERB_BEFORE_UP) return@replace match.value
+                }
                 "${match.groupValues[1]}$canonical"
             }
         }
@@ -216,9 +226,11 @@ object TranscriptNormalizer {
             // 3a. Explicit single-word alias
             val explicit = lexicon.explicitAliases[lowerCore]
             if (explicit != null) {
-                // Guard "naughty" / "moody" unless near project/tag context or exact uncommon alias
+                val blockedByNaughtyCopula = lowerCore == "naughty" &&
+                    prevLower in NAUGHTY_COPULA_BEFORE_WORDS &&
+                    !inProjectContext
                 val needsContext = lowerCore in AMBIGUOUS_ENGLISH_WORDS
-                if (!needsContext || inProjectContext) {
+                if (!blockedByNaughtyCopula && (!needsContext || inProjectContext)) {
                     val cleanExplicit = if (leadingPunct.contains('@') && explicit.startsWith('@')) {
                         explicit.removePrefix("@")
                     } else if (leadingPunct.contains('#') && explicit.startsWith('#')) {
@@ -259,7 +271,29 @@ object TranscriptNormalizer {
             }
         }
 
-        val joined = tokens.joinToString(" ")
+        // 3d. Merge "Noory" + "up" -> "Noory app" (Google STT often mishears "app" as "up" at phrase end)
+        val mergedTokens = mutableListOf<String>()
+        var ti = 0
+        while (ti < tokens.size) {
+            val curr = tokens[ti]
+            val next = tokens.getOrNull(ti + 1)
+            val prevCore = mergedTokens.lastOrNull()?.lowercase(Locale.ROOT)?.trim('.', ',', ':', ';', '!', '?')
+            val currTrail = curr.takeLastWhile { it in setOf('.', ',', '!', '?', ':', ';', '"', ')') }
+            val currCore = curr.substring(0, (curr.length - currTrail.length).coerceAtLeast(0))
+            if (next != null && currTrail.isEmpty() && currCore.equals("Noory", ignoreCase = true)) {
+                val nextTrail = next.takeLastWhile { it in setOf('.', ',', '!', '?', ':', ';', '"', ')') }
+                val nextCore = next.substring(0, (next.length - nextTrail.length).coerceAtLeast(0))
+                if (nextCore.equals("up", ignoreCase = true) && prevCore !in PHRASAL_VERB_BEFORE_UP) {
+                    mergedTokens += "${currCore} app$nextTrail"
+                    ti += 2
+                    continue
+                }
+            }
+            mergedTokens += curr
+            ti++
+        }
+
+        val joined = mergedTokens.joinToString(" ")
             .replace(Regex("\\s+([?.!,;:])"), "$1")
             .replace(Regex("([?.!,;:])([^\\s\"')\\d/:])"), "$1 $2")
             .replace(Regex("\\s+"), " ")
@@ -337,6 +371,7 @@ object TranscriptNormalizer {
     fun biasingTerms(customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY, maxTerms: Int = 100): ArrayList<String> {
         val merged = mergeGlossaries(DEFAULT_RAW_VOCABULARY, customVocabularyRaw)
         val lexicon = parseVocabulary(merged)
+        val aliasedCanonicals = lexicon.explicitAliases.values.mapTo(hashSetOf()) { it.lowercase(Locale.ROOT) }
         val ordered = lexicon.terms
             .map { it.trim() }
             .filter { it.length in 2..48 }
@@ -345,6 +380,7 @@ object TranscriptNormalizer {
                 compareByDescending<String> { term ->
                     var score = 0
                     if (Regex("^[A-Z]{2,}s?[0-9]*$").matches(term)) score += 6
+                    if (term.lowercase(Locale.ROOT) in aliasedCanonicals) score += 5
                     if (term.any { it in "äöüßÄÖÜ" }) score += 4
                     if (term.contains(' ')) score += 2
                     if (term.any { it.isUpperCase() }) score += 1
@@ -523,7 +559,9 @@ object TranscriptNormalizer {
         return dp[b.length]
     }
 
-    private val AMBIGUOUS_ENGLISH_WORDS = setOf("naughty", "moody", "said", "army")
+    private val AMBIGUOUS_ENGLISH_WORDS = setOf("moody", "said", "army")
+    private val NAUGHTY_COPULA_BEFORE_WORDS = setOf("be", "being", "been", "acting", "behaving", "very", "so")
+    private val PHRASAL_VERB_BEFORE_UP = setOf("set", "back", "pick", "clean", "hook", "spin", "start", "stand", "warm", "wake")
     private val CONTEXT_AFTER_WORDS = setOf("app", "project", "team", "backlog", "task", "tasks", "build")
     private val CONTEXT_BEFORE_WORDS = setOf("for", "under", "to", "with", "call", "message", "ping", "email", "ask", "tell")
     private val COMMON_STOP_WORDS = setOf(
