@@ -39,14 +39,14 @@ class GlossarySyncWorker(
 object GlossarySyncScheduler {
     private const val PERIODIC_WORK_NAME = "ticktick_glossary_weekly_sync"
     private const val ONE_TIME_WORK_NAME = "ticktick_glossary_immediate_sync"
-    private const val SEVEN_DAYS_MS = 7L * 24L * 60L * 60L * 1000L
+    private const val ONE_DAY_MS = 24L * 60L * 60L * 1000L
 
     private fun connectedConstraints(): Constraints = Constraints.Builder()
         .setRequiredNetworkType(NetworkType.CONNECTED)
         .build()
 
     fun ensureScheduled(context: Context) {
-        val request = PeriodicWorkRequestBuilder<GlossarySyncWorker>(7, TimeUnit.DAYS)
+        val request = PeriodicWorkRequestBuilder<GlossarySyncWorker>(1, TimeUnit.DAYS)
             .setConstraints(connectedConstraints())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.MINUTES)
             .build()
@@ -68,7 +68,7 @@ object GlossarySyncScheduler {
         val settings = SettingsRepository.getInstance(context)
         if (!settings.tickTickGlossaryWeeklyEnabled) return
         val lastSync = settings.tickTickGlossaryLastSyncAt
-        if (lastSync == 0L || (nowMs - lastSync) > SEVEN_DAYS_MS) {
+        if (lastSync == 0L || (nowMs - lastSync) > ONE_DAY_MS) {
             enqueueOneTimeSync(context, manualTrigger = false)
         }
     }

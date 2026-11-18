@@ -26,14 +26,16 @@ data class GlossaryPayloadDto(
     val version: Long = 0L,
     val updatedAt: String = "",
     val count: Int = 0,
-    val entries: List<GlossaryEntryDto> = emptyList()
+    val entries: List<GlossaryEntryDto> = emptyList(),
+    val contextIndex: ContextIndexPayloadDto? = null,
 )
 
 sealed class GlossarySyncOutcome {
     data class Success(
         val sourceLabel: String,
         val count: Int,
-        val formattedText: String
+        val formattedText: String,
+        val contextIndex: ContextIndexPayloadDto? = null,
     ) : GlossarySyncOutcome()
 
     data class Failure(val reason: String) : GlossarySyncOutcome()
@@ -57,8 +59,14 @@ class GlossarySyncClient(
         when (outcome) {
             is GlossarySyncOutcome.Success -> {
                 settings.tickTickSyncedGlossary = outcome.formattedText
+                ContextIndexManager.saveSyncedIndex(context, outcome.contextIndex)
+                val ticktickTasksSynced = runCatching {
+                    ContextIndexManager.syncActiveTickTickProjects(context, settings.tickTickAccessToken, baseClient)
+                }.getOrDefault(0)
                 settings.tickTickGlossaryLastSyncAt = System.currentTimeMillis()
-                settings.tickTickGlossaryLastStatus = "Synced ${outcome.count} entries (${outcome.sourceLabel})"
+                val ctxSuffix = outcome.contextIndex?.let { " + ${it.unigrams.size} ctx words" }.orEmpty()
+                val ttSuffix = if (ticktickTasksSynced > 0) " + $ticktickTasksSynced live tasks" else ""
+                settings.tickTickGlossaryLastStatus = "Synced ${outcome.count} entries$ctxSuffix$ttSuffix (${outcome.sourceLabel})"
             }
             is GlossarySyncOutcome.Failure -> {
                 settings.tickTickGlossaryLastStatus = "Failed: ${outcome.reason}"
@@ -81,11 +89,12 @@ class GlossarySyncClient(
                 timeoutMs = 2500L,
                 authToken = ""
             )
-            primaryResult.onSuccess { entries ->
+            primaryResult.onSuccess { (entries, ctx) ->
                 return@withContext GlossarySyncOutcome.Success(
                     sourceLabel = "Mac Bridge",
                     count = entries.size,
-                    formattedText = formatEntries(entries)
+                    formattedText = formatEntries(entries),
+                    contextIndex = ctx,
                 )
             }.onFailure { err ->
                 errors += "Mac: ${err.message ?: err.javaClass.simpleName}"
@@ -99,11 +108,12 @@ class GlossarySyncClient(
                 timeoutMs = 10000L,
                 authToken = authToken.trim()
             )
-            fallbackResult.onSuccess { entries ->
+            fallbackResult.onSuccess { (entries, ctx) ->
                 return@withContext GlossarySyncOutcome.Success(
                     sourceLabel = "GitHub Fallback",
                     count = entries.size,
-                    formattedText = formatEntries(entries)
+                    formattedText = formatEntries(entries),
+                    contextIndex = ctx,
                 )
             }.onFailure { err ->
                 errors += "GitHub: ${err.message ?: err.javaClass.simpleName}"
@@ -121,7 +131,7 @@ class GlossarySyncClient(
         url: String,
         timeoutMs: Long,
         authToken: String
-    ): Result<List<GlossaryEntryDto>> = runCatching {
+    ): Result<Pair<List<GlossaryEntryDto>, ContextIndexPayloadDto?>> = runCatching {
         val client = baseClient.newBuilder()
             .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -145,18 +155,24 @@ class GlossarySyncClient(
             if (body.isEmpty()) {
                 error("Empty response")
             }
-            parseGlossaryJson(body)
+            parseGlossaryPayload(body)
         }
     }
 
-    internal fun parseGlossaryJson(rawJson: String): List<GlossaryEntryDto> {
+    internal fun parseGlossaryJson(rawJson: String): List<GlossaryEntryDto> =
+        parseGlossaryPayload(rawJson).first
+
+    internal fun parseGlossaryPayload(rawJson: String): Pair<List<GlossaryEntryDto>, ContextIndexPayloadDto?> {
         val root: JsonElement = json.parseToJsonElement(rawJson)
+        var parsedContext: ContextIndexPayloadDto? = null
         val rawEntries = when (root) {
             is JsonObject -> {
                 if (!root.containsKey("entries")) {
                     error("Glossary JSON missing 'entries' field")
                 }
-                json.decodeFromJsonElement<GlossaryPayloadDto>(root).entries
+                val dto = json.decodeFromJsonElement<GlossaryPayloadDto>(root)
+                parsedContext = dto.contextIndex
+                dto.entries
             }
             is JsonArray -> root.mapNotNull { elem ->
                 when (elem) {
@@ -169,7 +185,7 @@ class GlossarySyncClient(
             }
             else -> emptyList()
         }
-        return rawEntries
+        val cleaned = rawEntries
             .mapNotNull { entry ->
                 val cleanTerm = entry.term.trim()
                 if (cleanTerm.isEmpty()) return@mapNotNull null
@@ -179,6 +195,7 @@ class GlossarySyncClient(
                     .distinct()
                 GlossaryEntryDto(term = cleanTerm, aliases = cleanAliases)
             }
+        return cleaned to parsedContext
     }
 
     internal fun formatEntries(entries: List<GlossaryEntryDto>): String {

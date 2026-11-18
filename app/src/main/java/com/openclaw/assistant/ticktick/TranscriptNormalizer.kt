@@ -131,7 +131,11 @@ object TranscriptNormalizer {
         }
     }
 
-    fun normalize(rawTranscript: String, customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY): String {
+    fun normalize(
+        rawTranscript: String,
+        customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY,
+        contextIndex: ContextIndex? = null,
+    ): String {
         var text = rawTranscript.trim().replace(Regex("\\s+"), " ")
         if (text.isEmpty()) return ""
 
@@ -271,6 +275,11 @@ object TranscriptNormalizer {
             }
         }
 
+        // 3c.5. Offline Second Brain + TickTick phonetic & bigram context rescoring
+        if (contextIndex != null && !contextIndex.isEmpty()) {
+            contextIndex.correctTokens(tokens)
+        }
+
         // 3d. Merge "Noory" + "up" -> "Noory app" (Google STT often mishears "app" as "up" at phrase end)
         val mergedTokens = mutableListOf<String>()
         var ti = 0
@@ -330,6 +339,7 @@ object TranscriptNormalizer {
     fun selectBestHypothesis(
         hypotheses: List<String>,
         customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY,
+        contextIndex: ContextIndex? = null,
     ): String {
         val cleaned = hypotheses.map { it.trim() }.filter { it.isNotEmpty() }
         if (cleaned.isEmpty()) return ""
@@ -340,20 +350,24 @@ object TranscriptNormalizer {
         val terms = lexicon.terms.map { it.trim() }.filter { it.length >= 2 }
 
         var bestCandidate = cleaned.first()
-        var bestScore = Int.MIN_VALUE
+        var bestScore = Double.NEGATIVE_INFINITY
 
         cleaned.forEachIndexed { rankIndex, candidate ->
-            var score = (cleaned.size - rankIndex) * 2 // small prior for higher-confidence rank
+            var score = if (contextIndex != null && !contextIndex.isEmpty()) {
+                contextIndex.scoreHypothesis(candidate, rankIndex, cleaned.size)
+            } else {
+                (cleaned.size - rankIndex) * 2.0
+            }
             val lower = candidate.lowercase(Locale.ROOT)
             for (term in terms) {
                 val termLower = term.lowercase(Locale.ROOT)
                 val regex = Regex("""(?<![A-Za-z0-9])${Regex.escape(termLower)}(?![A-Za-z0-9])""")
                 if (regex.containsMatchIn(lower)) {
-                    score += if (term.any { it.isUpperCase() } && term.length <= 6) 10 else 6
+                    score += if (term.any { it.isUpperCase() } && term.length <= 6) 10.0 else 6.0
                 }
                 val exactRegex = Regex("""(?<![A-Za-z0-9])${Regex.escape(term)}(?![A-Za-z0-9])""")
                 if (exactRegex.containsMatchIn(candidate)) {
-                    score += 4
+                    score += 4.0
                 }
             }
             if (score > bestScore) {

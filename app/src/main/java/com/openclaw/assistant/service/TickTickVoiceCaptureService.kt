@@ -37,6 +37,7 @@ import com.openclaw.assistant.SettingsActivity
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.speech.VoskModelLoader
 import com.openclaw.assistant.ticktick.CaptureSaveOutcome
+import com.openclaw.assistant.ticktick.ContextIndexManager
 import com.openclaw.assistant.ticktick.OnDeviceLanguageSupport
 import com.openclaw.assistant.ticktick.TickTickCaptureRepository
 import com.openclaw.assistant.ticktick.TranscriptNormalizer
@@ -389,6 +390,7 @@ class TickTickVoiceCaptureService : Service() {
             emptyList()
         }
         val effectiveVocab = settings.effectiveTickTickVocabulary()
+        val contextIndex = ContextIndexManager.getIndex(applicationContext)
         val biasingList = TranscriptNormalizer.biasingTerms(effectiveVocab)
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -461,7 +463,7 @@ class TickTickVoiceCaptureService : Service() {
                         val candidates = segmentResults
                             .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             .orEmpty()
-                        val segText = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab)
+                        val segText = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         if (segText.isNotEmpty()) {
                             sessionSegments.add(segText)
                             latestAndroidPartial = ""
@@ -478,7 +480,7 @@ class TickTickVoiceCaptureService : Service() {
                         val candidates = results
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             .orEmpty()
-                        val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab)
+                        val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         val trailing = text.ifEmpty { latestAndroidPartial.trim() }
                         latestAndroidPartial = ""
                         activeSegmentDeferred?.complete(trailing to null)

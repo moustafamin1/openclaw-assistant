@@ -41,8 +41,12 @@ class TickTickCaptureRepository(
     fun observePendingCount(): Flow<Int> = dao.observeCount()
 
     suspend fun enqueueAndSync(rawTranscript: String): CaptureSaveOutcome {
-        val cleanTitle = cleanTranscript(rawTranscript, settings.effectiveTickTickVocabulary())
+        val contextIndex = ContextIndexManager.getIndex(appContext)
+        val cleanTitle = cleanTranscript(rawTranscript, settings.effectiveTickTickVocabulary(), contextIndex)
         if (cleanTitle.isEmpty()) return CaptureSaveOutcome.IgnoredBlank
+
+        // Reinforce local offline unigram/bigram index immediately upon capture
+        ContextIndexManager.recordSentence(appContext, cleanTitle)
 
         val rowId = dao.insert(
             PendingTickTickTaskEntity(
@@ -151,8 +155,9 @@ class TickTickCaptureRepository(
         fun cleanTranscript(
             raw: String,
             customVocabulary: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+            contextIndex: ContextIndex? = null,
         ): String {
-            return TranscriptNormalizer.normalize(raw, customVocabulary)
+            return TranscriptNormalizer.normalize(raw, customVocabulary, contextIndex)
         }
     }
 }
