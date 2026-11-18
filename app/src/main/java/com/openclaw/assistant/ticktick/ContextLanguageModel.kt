@@ -104,6 +104,8 @@ class ContextIndex(
     ) {
         if (unigrams.isEmpty() || tokens.isEmpty()) return
 
+        collapseSplitTerms(tokens, protectedCommonWords)
+
         val cores = tokens.map { ContextLanguageModel.stripTokenPunct(it) }
         val resolvedLowers = cores.map { it.second.lowercase(Locale.ROOT) }.toMutableList()
 
@@ -181,6 +183,103 @@ class ContextIndex(
                 resolvedLowers[i] = bestCand.key
             }
         }
+    }
+
+    /**
+     * Collapses adjacent 2-word and 3-word STT splits (e.g. "okey ours" -> "OKRs",
+     * "finanz amt" -> "Finanzamt", "ay pee kay" -> "APK") into single unigrams in the index.
+     */
+    private fun collapseSplitTerms(
+        tokens: MutableList<String>,
+        protectedCommonWords: Set<String>,
+    ) {
+        if (tokens.size < 2) return
+        val out = ArrayList<String>(tokens.size)
+        var i = 0
+        while (i < tokens.size) {
+            var matched = false
+            for (winSize in listOf(3, 2)) {
+                if (i + winSize > tokens.size) continue
+                val slice = tokens.subList(i, i + winSize)
+                val firstParts = ContextLanguageModel.stripTokenPunct(slice.first())
+                val lastParts = ContextLanguageModel.stripTokenPunct(slice.last())
+                if (firstParts.third.isNotEmpty() || lastParts.first.isNotEmpty()) continue
+
+                val middleOk = (1 until winSize - 1).all { idx ->
+                    val mid = ContextLanguageModel.stripTokenPunct(slice[idx])
+                    mid.first.isEmpty() && mid.third.isEmpty()
+                }
+                if (!middleOk) continue
+
+                val cores = slice.mapIndexed { idx, tok ->
+                    when (idx) {
+                        0 -> firstParts.second
+                        winSize - 1 -> lastParts.second
+                        else -> tok
+                    }
+                }
+                val allLatin = cores.all { c ->
+                    c.isNotEmpty() && c.all { it in 'A'..'Z' || it in 'a'..'z' || it in "äöüßÄÖÜ" }
+                }
+                if (!allLatin) continue
+
+                val lowers = cores.map { it.lowercase(Locale.ROOT) }
+                val letterJoined = ContextLanguageModel.joinSpokenLetters(lowers)
+                if (winSize == 3 && letterJoined == null) continue
+
+                // Skip known frequent 2-word phrases and pure common-word pairs
+                if (winSize == 2 && letterJoined == null) {
+                    if (bigramWeight(lowers[0], lowers[1]) >= 1.5) continue
+                    if (lowers[0] in protectedCommonWords && lowers[1] in protectedCommonWords) continue
+                }
+
+                val joined = lowers.joinToString("")
+                val winner = findSplitMatch(joined, letterJoined)
+                if (winner != null) {
+                    val outText = if (winner.canonical != winner.key) winner.canonical else winner.key
+                    out += "${firstParts.first}$outText${lastParts.third}"
+                    i += winSize
+                    matched = true
+                    break
+                }
+            }
+            if (!matched) {
+                out += tokens[i]
+                i++
+            }
+        }
+        tokens.clear()
+        tokens.addAll(out)
+    }
+
+    private fun findSplitMatch(joined: String, letterJoined: String?): ContextUnigram? {
+        if (letterJoined != null) {
+            val exactLetters = unigrams[letterJoined]
+            if (exactLetters != null && exactLetters.weight >= 2.0) return exactLetters
+        }
+        val exactJoined = unigrams[joined]
+        if (exactJoined != null && exactJoined.weight >= 2.0) return exactJoined
+
+        val joinedCode = ContextLanguageModel.phoneticCode(joined)
+        val bucket = phoneticBuckets[joinedCode] ?: return null
+        var best: ContextUnigram? = null
+        var bestScore = 0.0
+        for (cand in bucket) {
+            if (cand.weight < 3.5) continue
+            if (ContextLanguageModel.phoneticCode(cand.key) != joinedCode) continue
+            val charSim = TranscriptNormalizer.normalizedSimilarity(
+                TranscriptNormalizer.foldGermanUmlauts(joined),
+                TranscriptNormalizer.foldGermanUmlauts(cand.key),
+            )
+            if (charSim < 0.45) continue
+            val acronymBonus = if (cand.canonical != cand.key) 1.5 else 0.0
+            val score = ln(1.0 + cand.weight) + charSim * 3.0 + acronymBonus
+            if (score > bestScore) {
+                bestScore = score
+                best = cand
+            }
+        }
+        return best
     }
 
     companion object {
@@ -340,5 +439,41 @@ object ContextLanguageModel {
         val charSim = TranscriptNormalizer.normalizedSimilarity(foldedA, foldedB)
         val phonSim = TranscriptNormalizer.normalizedSimilarity(phoneticCode(foldedA), phoneticCode(foldedB))
         return charSim * 0.55 + phonSim * 0.45
+    }
+
+    private val SPOKEN_LETTER_MAP = mapOf(
+        "ay" to "a", "a" to "a",
+        "bee" to "b", "be" to "b", "b" to "b",
+        "see" to "c", "sea" to "c", "c" to "c",
+        "dee" to "d", "d" to "d",
+        "ee" to "e", "e" to "e",
+        "eff" to "f", "f" to "f",
+        "gee" to "g", "g" to "g",
+        "aitch" to "h", "h" to "h",
+        "eye" to "i", "i" to "i",
+        "jay" to "j", "j" to "j",
+        "kay" to "k", "okey" to "ok", "okay" to "ok", "k" to "k",
+        "el" to "l", "l" to "l",
+        "em" to "m", "m" to "m",
+        "en" to "n", "n" to "n",
+        "oh" to "o", "o" to "o",
+        "pee" to "p", "p" to "p",
+        "cue" to "q", "queue" to "q", "q" to "q",
+        "are" to "r", "r" to "r",
+        "ess" to "s", "s" to "s",
+        "tee" to "t", "t" to "t",
+        "you" to "u", "u" to "u",
+        "vee" to "v", "v" to "v",
+        "doubleyou" to "w", "w" to "w",
+        "ex" to "x", "x" to "x",
+        "why" to "y", "y" to "y",
+        "zee" to "z", "zed" to "z", "z" to "z",
+        "eyes" to "is", "ares" to "rs", "ours" to "rs", "rs" to "rs",
+    )
+
+    fun joinSpokenLetters(tokens: List<String>): String? {
+        if (tokens.isEmpty()) return null
+        val mapped = tokens.map { SPOKEN_LETTER_MAP[it] ?: return null }
+        return mapped.joinToString("")
     }
 }

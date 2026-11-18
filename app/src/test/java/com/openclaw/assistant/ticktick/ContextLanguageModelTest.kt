@@ -12,7 +12,11 @@ class ContextLanguageModelTest {
                 "app" to ContextUnigramDto(w = 99.0, c = "app"),
                 "streak" to ContextUnigramDto(w = 14.0, c = "streak"),
                 "specs" to ContextUnigramDto(w = 6.0, c = "specs"),
-                "tazkiyah" to ContextUnigramDto(w = 18.0, c = "Tazkiyah"),
+                "okrs" to ContextUnigramDto(w = 24.6, c = "OKRs"),
+                "tk" to ContextUnigramDto(w = 70.5, c = "TK"),
+                "apk" to ContextUnigramDto(w = 10.0, c = "APK"),
+                "mvp" to ContextUnigramDto(w = 8.0, c = "MVP"),
+                "finanzamt" to ContextUnigramDto(w = 20.0, c = "Finanzamt"),
                 "grafana" to ContextUnigramDto(w = 16.0, c = "Grafana"),
                 "dashboard" to ContextUnigramDto(w = 10.0, c = "dashboard"),
                 "zebeeb" to ContextUnigramDto(w = 60.0, c = "Zebeeb"),
@@ -26,7 +30,6 @@ class ContextLanguageModelTest {
                 "streak specs" to 4.0,
                 "specs noory" to 3.0,
                 "grafana dashboard" to 8.0,
-                "tazkiyah specs" to 6.0,
                 "set it" to 3.0,
                 "it up" to 3.0,
             ),
@@ -37,13 +40,9 @@ class ContextLanguageModelTest {
     @Test
     fun fixesUnlistedDomainTermsUsingPhoneticBucketsAndBigramContext() {
         val ctx = buildSampleContext()
-        // Use minimal vocabulary (no explicit aliases for Tazkiyah, Grafana, nuri, up->app)
+        // Minimal vocabulary (no explicit aliases for Grafana, nuri, up->app, okey ours, tee kay, apk, finanzamt)
         val minimalVocab = "TickTick"
 
-        assertEquals(
-            "Update Tazkiyah specs",
-            TranscriptNormalizer.normalize("update taskiyah specs", minimalVocab, ctx),
-        )
         assertEquals(
             "Fix Grafana dashboard",
             TranscriptNormalizer.normalize("fix graphana dashboard", minimalVocab, ctx),
@@ -51,6 +50,14 @@ class ContextLanguageModelTest {
         assertEquals(
             "Read streak specs Noory app",
             TranscriptNormalizer.normalize("read streak specs nuri up", minimalVocab, ctx),
+        )
+        assertEquals(
+            "Fix OKRs and TK",
+            TranscriptNormalizer.normalize("fix okey ours and tee kay", minimalVocab, ctx),
+        )
+        assertEquals(
+            "Download APK for MVP at Finanzamt",
+            TranscriptNormalizer.normalize("download ay pee kay for em vee pee at finanz amt", minimalVocab, ctx),
         )
     }
 
