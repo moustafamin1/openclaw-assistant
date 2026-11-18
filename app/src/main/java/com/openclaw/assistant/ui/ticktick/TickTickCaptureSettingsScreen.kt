@@ -154,6 +154,7 @@ fun TickTickCaptureSettingsContent(
     }
     var showAdbGuide by remember { mutableStateOf(false) }
     var keyDiagnostic by remember { mutableStateOf(AgentVoiceAccessibilityService.lastVolumeDiagnostic) }
+    var captureDiagnostic by remember { mutableStateOf(TickTickVoiceCaptureService.lastCaptureDiagnostic) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, context) {
@@ -165,6 +166,7 @@ fun TickTickCaptureSettingsContent(
                 fullScreenIntentGranted = TickTickLockCaptureActivity.canUseFullScreenIntent(context)
                 screenOffVolumeGranted = ScreenOffVolumeKeyBridge.hasPermission(context)
                 keyDiagnostic = AgentVoiceAccessibilityService.lastVolumeDiagnostic
+                captureDiagnostic = TickTickVoiceCaptureService.lastCaptureDiagnostic
                 ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
             }
         }
@@ -402,12 +404,18 @@ fun TickTickCaptureSettingsContent(
                     TextButton(
                         onClick = {
                             keyDiagnostic = AgentVoiceAccessibilityService.lastVolumeDiagnostic
+                            captureDiagnostic = TickTickVoiceCaptureService.lastCaptureDiagnostic
                             ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
                         },
                     ) {
                         Text("Refresh")
                     }
                 }
+                Text(
+                    text = "Last capture: $captureDiagnostic",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
                 Text(
                     "Hold Threshold: ${holdThresholdMs.roundToLong()} ms",

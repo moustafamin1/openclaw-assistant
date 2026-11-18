@@ -26,4 +26,42 @@ class OnDeviceLanguageSupportTest {
             OnDeviceLanguageSupport.pickBestTag(listOf("en-US", "de-DE"), "ar", listOf("ar-EG", "ar-SA", "ar")),
         )
     }
+
+    @Test
+    fun resolvePrimaryLanguageAvoidsUnsupportedEnDeLocaleAndPicksInstalledEnglishPack() {
+        val installed = listOf("de-DE", "en-US", "en-GB")
+
+        assertEquals(
+            "en-US",
+            OnDeviceLanguageSupport.resolvePrimaryLanguage(
+                configuredLanguage = "",
+                installedPacks = installed,
+                systemTag = "en-DE",
+            ),
+        )
+        assertEquals(
+            "en-GB",
+            OnDeviceLanguageSupport.resolvePrimaryLanguage(
+                configuredLanguage = "",
+                installedPacks = installed,
+                systemTag = "en-GB",
+            ),
+        )
+        assertEquals(
+            "en-US",
+            OnDeviceLanguageSupport.resolvePrimaryLanguage(
+                configuredLanguage = "",
+                installedPacks = emptyList(),
+                systemTag = "de-DE",
+            ),
+        )
+        assertEquals(
+            "de-DE",
+            OnDeviceLanguageSupport.resolvePrimaryLanguage(
+                configuredLanguage = "de-AT",
+                installedPacks = installed,
+                systemTag = "en-US",
+            ),
+        )
+    }
 }

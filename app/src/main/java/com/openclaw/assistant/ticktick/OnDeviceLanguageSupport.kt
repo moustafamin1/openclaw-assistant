@@ -63,6 +63,48 @@ object OnDeviceLanguageSupport {
         return listOf(normalizedPrimary).distinct()
     }
 
+    /**
+     * Resolves a BCP-47 tag guaranteed to match an installed on-device English pack whenever
+     * possible, avoiding unsupported locale tags like "en-DE" that force silent Vosk fallback.
+     */
+    fun resolvePrimaryLanguage(
+        configuredLanguage: String,
+        installedPacks: List<String> = cachedStatus?.allInstalled.orEmpty(),
+        systemTag: String = Locale.getDefault().toLanguageTag(),
+    ): String {
+        val cleaned = configuredLanguage.trim()
+        if (cleaned.isNotEmpty()) {
+            if (installedPacks.isEmpty()) return cleaned
+            val exact = installedPacks.firstOrNull { it.equals(cleaned, ignoreCase = true) }
+            if (exact != null) return exact
+            val family = cleaned.substringBefore('-').lowercase(Locale.ROOT)
+            val familyMatch = pickBestTag(
+                installedPacks,
+                family,
+                listOf(cleaned, "en-US", "en-GB", "de-DE", "ar-EG", "ar-SA")
+                    .filter { it.substringBefore('-').equals(family, ignoreCase = true) },
+            )
+            if (familyMatch != null) return familyMatch
+            return cleaned
+        }
+
+        if (installedPacks.isNotEmpty()) {
+            // Prefer exact installed English system tag (e.g. en-US / en-GB), never non-installed en-DE.
+            if (systemTag.lowercase(Locale.ROOT).startsWith("en")) {
+                val exactSys = installedPacks.firstOrNull { it.equals(systemTag, ignoreCase = true) }
+                if (exactSys != null) return exactSys
+            }
+            val bestEn = pickBestTag(installedPacks, "en", listOf("en-US", "en-GB", "en"))
+            if (bestEn != null) return bestEn
+        }
+
+        return when {
+            systemTag.equals("en-GB", ignoreCase = true) -> "en-GB"
+            systemTag.equals("en-AU", ignoreCase = true) -> "en-AU"
+            else -> "en-US"
+        }
+    }
+
     suspend fun queryAndPrepare(
         context: Context,
         triggerDownloads: Boolean = false,

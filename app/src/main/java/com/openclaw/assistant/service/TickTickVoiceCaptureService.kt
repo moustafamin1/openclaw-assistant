@@ -157,13 +157,22 @@ class TickTickVoiceCaptureService : Service() {
             try {
                 val transcript = when {
                     useAndroidOnDevice -> {
-                        captureWithAndroidOnDeviceStt() ?: if (isRecording.get() && !captureCancelled) {
-                            captureWithVosk()
+                        val googleText = captureWithAndroidOnDeviceStt()
+                        if (googleText != null) {
+                            googleText
+                        } else if (isRecording.get() && !captureCancelled) {
+                            val voskText = captureWithVosk()
+                            lastCaptureDiagnostic = "$lastCaptureDiagnostic -> Vosk(fallback) raw=\"$voskText\""
+                            voskText
                         } else {
                             ""
                         }
                     }
-                    else -> captureWithVosk()
+                    else -> {
+                        val voskText = captureWithVosk()
+                        lastCaptureDiagnostic = "Vosk(selected) raw=\"$voskText\""
+                        voskText
+                    }
                 }
                 handleTranscriptResult(transcript, cancelled = captureCancelled)
             } finally {
@@ -368,12 +377,12 @@ class TickTickVoiceCaptureService : Service() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
 
         val multiLangEnabled = settings.tickTickMultiLangSwitch
-        // Prepare language pack list if multi-language switching is explicitly enabled.
-        if (multiLangEnabled && OnDeviceLanguageSupport.cachedStatus == null) {
+        // Always inspect installed on-device packs once so we pick a valid installed tag (e.g. en-US, not en-DE).
+        if (OnDeviceLanguageSupport.cachedStatus == null) {
             withTimeoutOrNull(450L) {
                 OnDeviceLanguageSupport.queryAndPrepare(
                     this@TickTickVoiceCaptureService,
-                    triggerDownloads = true,
+                    triggerDownloads = multiLangEnabled,
                 )
             }
         }
@@ -381,9 +390,12 @@ class TickTickVoiceCaptureService : Service() {
         val sessionSegments = java.util.Collections.synchronizedList(mutableListOf<String>())
         val startedNotified = AtomicBoolean(false)
         var shouldFallbackToVosk = false
+        var lastResultMode = "none"
+        var lastRawCandidates: List<String> = emptyList()
+        var lastErrCode: Int? = null
+        var retriedEnUs = false
 
-        val language = settings.speechLanguage.takeIf { it.isNotBlank() }
-            ?: Locale.getDefault().toLanguageTag()
+        var language = OnDeviceLanguageSupport.resolvePrimaryLanguage(settings.speechLanguage)
         val switchTags = if (multiLangEnabled) {
             OnDeviceLanguageSupport.allowedSwitchTags(language)
         } else {
@@ -391,26 +403,24 @@ class TickTickVoiceCaptureService : Service() {
         }
         val effectiveVocab = settings.effectiveTickTickVocabulary()
         val contextIndex = ContextIndexManager.getIndex(applicationContext)
-        val biasingList = TranscriptNormalizer.biasingTerms(effectiveVocab)
+        // Keep EXTRA_BIASING_STRINGS tight (top 25) so unrelated words never steal beam probability from normal English.
+        val biasingList = TranscriptNormalizer.biasingTerms(effectiveVocab, maxTerms = 25)
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        fun buildRecognizerIntent(targetLang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, targetLang)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 300_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 300_000L)
+            // Long silence window so deliberate/slow speech does not split mid-sentence;
+            // omit EXTRA_SEGMENTED_SESSION so stopListening() triggers full Pass-2 onResults() rescoring.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000L)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
                     RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY,
-                )
-                // Keep one continuous session open across pauses & long utterances (1-5 min).
-                putExtra(
-                    RecognizerIntent.EXTRA_SEGMENTED_SESSION,
-                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
                 )
                 if (biasingList.isNotEmpty()) {
                     putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, biasingList)
@@ -463,6 +473,8 @@ class TickTickVoiceCaptureService : Service() {
                         val candidates = segmentResults
                             .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             .orEmpty()
+                        lastRawCandidates = candidates
+                        lastResultMode = "onSegmentResults"
                         val segText = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         if (segText.isNotEmpty()) {
                             sessionSegments.add(segText)
@@ -472,6 +484,7 @@ class TickTickVoiceCaptureService : Service() {
 
                     override fun onEndOfSegmentedSession() {
                         val trailing = latestAndroidPartial.trim()
+                        if (trailing.isNotEmpty()) lastResultMode = "partial-end-seg"
                         latestAndroidPartial = ""
                         activeSegmentDeferred?.complete(trailing to null)
                     }
@@ -480,6 +493,8 @@ class TickTickVoiceCaptureService : Service() {
                         val candidates = results
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             .orEmpty()
+                        lastRawCandidates = candidates
+                        lastResultMode = if (candidates.isNotEmpty()) "onResults(Pass2)" else "partial-empty-res"
                         val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         val trailing = text.ifEmpty { latestAndroidPartial.trim() }
                         latestAndroidPartial = ""
@@ -488,7 +503,11 @@ class TickTickVoiceCaptureService : Service() {
 
                     override fun onError(error: Int) {
                         Log.w(TAG, "Android on-device STT error: $error")
+                        lastErrCode = error
                         val trailing = latestAndroidPartial.trim()
+                        if (trailing.isNotEmpty() && lastResultMode == "none") {
+                            lastResultMode = "partial-err-$error"
+                        }
                         latestAndroidPartial = ""
                         activeSegmentDeferred?.complete(trailing to error)
                     }
@@ -501,6 +520,7 @@ class TickTickVoiceCaptureService : Service() {
                 latestAndroidPartial = ""
                 val segDone = CompletableDeferred<Pair<String, Int?>>()
                 activeSegmentDeferred = segDone
+                val intent = buildRecognizerIntent(language)
 
                 withContext(Dispatchers.Main) {
                     recognizer.startListening(intent)
@@ -510,8 +530,13 @@ class TickTickVoiceCaptureService : Service() {
                     delay(50L)
                 }
 
-                val (tailText, segErr) = withTimeoutOrNull(2600L) { segDone.await() }
-                    ?: (latestAndroidPartial.trim() to null)
+                val awaited = withTimeoutOrNull(3000L) { segDone.await() }
+                val (tailText, segErr) = if (awaited != null) {
+                    awaited
+                } else {
+                    lastResultMode = "partial-timeout"
+                    latestAndroidPartial.trim() to null
+                }
                 activeSegmentDeferred = null
 
                 if (tailText.isNotBlank() && sessionSegments.lastOrNull() != tailText) {
@@ -520,6 +545,18 @@ class TickTickVoiceCaptureService : Service() {
 
                 if (!isRecording.get() || captureCancelled) {
                     break
+                }
+
+                // If chosen locale tag was rejected (e.g. en-DE), retry once with en-US before Vosk fallback.
+                if ((segErr == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                        segErr == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) &&
+                    !retriedEnUs &&
+                    !language.equals("en-US", ignoreCase = true)
+                ) {
+                    retriedEnUs = true
+                    language = "en-US"
+                    delay(40L)
+                    continue
                 }
 
                 val isFatalStartupError = segErr != null && (
@@ -556,10 +593,20 @@ class TickTickVoiceCaptureService : Service() {
             }
         }
 
+        val finalRaw = sessionSegments.joinToString(" ").trim()
+        val nBestPreview = lastRawCandidates.take(3).joinToString(" | ") { "\"$it\"" }
+        val errSuffix = lastErrCode?.let { " err=$it" }.orEmpty()
+        lastCaptureDiagnostic = if (shouldFallbackToVosk) {
+            "Google-OnDevice FAILED($language$errSuffix)"
+        } else {
+            "Google-OnDevice($language, $lastResultMode, bias=${biasingList.size}$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
+        }
+        Log.i(TAG, "Capture diagnostic: $lastCaptureDiagnostic")
+
         return if (shouldFallbackToVosk) {
             null
         } else {
-            sessionSegments.joinToString(" ").trim()
+            finalRaw
         }
     }
 
@@ -568,6 +615,7 @@ class TickTickVoiceCaptureService : Service() {
 
         when (val outcome = repository.enqueueAndSync(transcript)) {
             is CaptureSaveOutcome.Synced -> {
+                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
                 if (outcome.taskId.isNotBlank()) {
                     triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
                 }
@@ -578,6 +626,7 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             is CaptureSaveOutcome.QueuedOffline -> {
+                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
                 triggerHaptic(SAVED_HAPTIC_TIMINGS, SAVED_HAPTIC_AMPLITUDES)
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_queued_title),
@@ -586,6 +635,7 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             is CaptureSaveOutcome.AuthRequired -> {
+                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> saved=\"${outcome.title}\""
                 triggerHaptic(ERROR_HAPTIC_TIMINGS, ERROR_HAPTIC_AMPLITUDES)
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_auth_title),
@@ -594,6 +644,7 @@ class TickTickVoiceCaptureService : Service() {
                 )
             }
             CaptureSaveOutcome.IgnoredBlank -> {
+                lastCaptureDiagnostic = "$lastCaptureDiagnostic -> blank"
                 showStatusNotificationIfAllowed(
                     title = getString(R.string.ticktick_notif_blank_title),
                     body = getString(R.string.ticktick_notif_blank_body),
@@ -851,6 +902,8 @@ class TickTickVoiceCaptureService : Service() {
         private val ERROR_HAPTIC_TIMINGS = longArrayOf(0L, 60L, 60L, 60L, 60L, 60L)
         private val ERROR_HAPTIC_AMPLITUDES = intArrayOf(0, 255, 0, 255, 0, 255)
         private val activeRecording = AtomicBoolean(false)
+        @Volatile
+        var lastCaptureDiagnostic: String = "No capture yet"
 
         fun isCapturing(): Boolean = activeRecording.get()
 
