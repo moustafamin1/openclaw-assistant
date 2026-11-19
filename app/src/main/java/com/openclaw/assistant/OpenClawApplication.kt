@@ -78,7 +78,8 @@ class OpenClawApplication : Application() {
         BridgeActivityLog.initialize(this)
         WakeLockManager.initialize(this)
         try {
-            if (com.openclaw.assistant.data.SettingsRepository.getInstance(this).tickTickGlossaryWeeklyEnabled) {
+            val appSettings = com.openclaw.assistant.data.SettingsRepository.getInstance(this)
+            if (appSettings.tickTickGlossaryWeeklyEnabled) {
                 com.openclaw.assistant.ticktick.GlossarySyncScheduler.ensureScheduled(this)
                 com.openclaw.assistant.ticktick.GlossarySyncScheduler.enqueueImmediateCatchUpIfStale(this)
             }
@@ -90,6 +91,13 @@ class OpenClawApplication : Application() {
                 runCatching {
                     com.openclaw.assistant.ticktick.OnDeviceLanguageSupport.warmSystemSpeechService(this@OpenClawApplication)
                 }
+                if (appSettings.tickTickSpeechEngine == com.openclaw.assistant.data.SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO &&
+                    com.openclaw.assistant.ticktick.Gemma4ModelManager.isModelReady(this@OpenClawApplication)
+                ) {
+                    runCatching {
+                        com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.prewarm(this@OpenClawApplication)
+                    }
+                }
             }
         } catch (e: Throwable) {
             Log.w("OpenClawApp", "Glossary/volume bridge init skipped: ${e.message}")
@@ -98,8 +106,22 @@ class OpenClawApplication : Application() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
+        // Skip UI_HIDDEN (20) & mild BACKGROUND (40) so Gemma 4 stays warm between captures;
+        // unload only under genuine system memory pressure (RUNNING_CRITICAL or >= MODERATE).
         @Suppress("DEPRECATION")
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+        val highMemoryPressure =
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= android.content.ComponentCallbacks2.TRIM_MEMORY_MODERATE
+        if (highMemoryPressure && com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.isLoaded()) {
+            Log.i("OpenClawApp", "Unloading Gemma 4 engine on onTrimMemory(level=$level)")
+            com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.unloadNow()
+        }
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        if (com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.isLoaded()) {
+            Log.i("OpenClawApp", "Unloading Gemma 4 engine on onLowMemory")
             com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.unloadNow()
         }
     }
