@@ -487,11 +487,21 @@ object ContextLanguageModel {
         return sb.toString().ifEmpty { w.take(2) }
     }
 
+    fun voicingNeutralCode(phonetic: String): String =
+        phonetic
+            .replace('b', 'p')
+            .replace('d', 't')
+            .replace('g', 'k')
+
     fun bucketKeys(word: String): List<String> {
         val primary = phoneticCode(word)
         if (primary.isEmpty()) return emptyList()
-        val keys = ArrayList<String>(2)
+        val keys = ArrayList<String>(3)
         keys += primary
+        val voicingNeutral = voicingNeutralCode(primary)
+        if (voicingNeutral.isNotEmpty() && voicingNeutral !in keys) {
+            keys += voicingNeutral
+        }
         // Secondary flap-tolerant bucket: drops medial 't'/'d' inside words ("naughty" -> "nr")
         val lower = word.lowercase(Locale.ROOT)
         if (lower.length >= 4 && (lower.contains('t') || lower.contains('d'))) {
@@ -499,7 +509,7 @@ object ContextLanguageModel {
                 .replace("t", "")
                 .replace("d", "") + lower.last()
             val flapCode = phoneticCode(noFlap)
-            if (flapCode.isNotEmpty() && flapCode != primary) {
+            if (flapCode.isNotEmpty() && flapCode !in keys) {
                 keys += flapCode
             }
         }
@@ -510,7 +520,12 @@ object ContextLanguageModel {
         val foldedA = TranscriptNormalizer.foldGermanUmlauts(a.lowercase(Locale.ROOT))
         val foldedB = TranscriptNormalizer.foldGermanUmlauts(b.lowercase(Locale.ROOT))
         val charSim = TranscriptNormalizer.normalizedSimilarity(foldedA, foldedB)
-        val phonSim = TranscriptNormalizer.normalizedSimilarity(phoneticCode(foldedA), phoneticCode(foldedB))
+        val codeA = phoneticCode(foldedA)
+        val codeB = phoneticCode(foldedB)
+        val phonSim = max(
+            TranscriptNormalizer.normalizedSimilarity(codeA, codeB),
+            TranscriptNormalizer.normalizedSimilarity(voicingNeutralCode(codeA), voicingNeutralCode(codeB)) * 0.92,
+        )
         return charSim * 0.55 + phonSim * 0.45
     }
 

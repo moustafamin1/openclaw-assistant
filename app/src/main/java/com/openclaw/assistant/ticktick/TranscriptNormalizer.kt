@@ -380,27 +380,55 @@ object TranscriptNormalizer {
 
     /**
      * Returns prioritized canonical terms to pass to Android's on-device speech recognizer
-     * (`RecognizerIntent.EXTRA_BIASING_STRINGS`, API 33+).
+     * (`RecognizerIntent.EXTRA_BIASING_STRINGS`, API 33+), combining explicit glossary terms
+     * with high-signal domain entities from the offline [ContextIndex].
      */
-    fun biasingTerms(customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY, maxTerms: Int = 100): ArrayList<String> {
+    fun biasingTerms(
+        customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY,
+        maxTerms: Int = 100,
+        contextIndex: ContextIndex? = null,
+    ): ArrayList<String> {
         val merged = mergeGlossaries(DEFAULT_RAW_VOCABULARY, customVocabularyRaw)
         val lexicon = parseVocabulary(merged)
         val aliasedCanonicals = lexicon.explicitAliases.values.mapTo(hashSetOf()) { it.lowercase(Locale.ROOT) }
-        val ordered = lexicon.terms
-            .map { it.trim() }
-            .filter { it.length in 2..48 }
-            .distinctBy { it.lowercase(Locale.ROOT) }
-            .sortedWith(
-                compareByDescending<String> { term ->
-                    var score = 0
-                    if (Regex("^[A-Z]{2,}s?[0-9]*$").matches(term)) score += 6
-                    if (term.lowercase(Locale.ROOT) in aliasedCanonicals) score += 5
-                    if (term.any { it in "äöüßÄÖÜ" }) score += 4
-                    if (term.contains(' ')) score += 2
-                    if (term.any { it.isUpperCase() }) score += 1
-                    score
+        val scoreByKey = linkedMapOf<String, Pair<String, Double>>()
+
+        for (rawTerm in lexicon.terms) {
+            val term = rawTerm.trim()
+            if (term.length !in 2..48) continue
+            val key = term.lowercase(Locale.ROOT)
+            var score = 10.0
+            if (Regex("^[A-Z]{2,}s?[0-9]*$").matches(term)) score += 6.0
+            if (key in aliasedCanonicals) score += 5.0
+            if (term.any { it in "äöüßÄÖÜ" }) score += 4.0
+            if (term.contains(' ')) score += 2.0
+            if (term.any { it.isUpperCase() }) score += 1.0
+            scoreByKey[key] = term to score
+        }
+
+        if (contextIndex != null && !contextIndex.isEmpty()) {
+            for (entry in contextIndex.unigrams.values) {
+                val canon = entry.canonical.trim()
+                if (entry.key.length !in 2..32 || entry.weight < 2.0) continue
+                if (entry.key in COMMON_STOP_WORDS || entry.key in ContextIndex.FUNCTION_WORDS) continue
+                val isAcronym = ContextLanguageModel.isAcronymOrMixed(canon)
+                val isUmlaut = ContextLanguageModel.hasGermanUmlaut(canon)
+                val isProper = canon != entry.key && entry.weight >= 8.0
+                if (!isAcronym && !isUmlaut && !isProper) continue
+                var score = kotlin.math.ln(1.0 + entry.weight)
+                if (isAcronym) score += 8.0
+                if (isUmlaut) score += 6.0
+                if (isProper) score += 3.0
+                val prev = scoreByKey[entry.key]
+                if (prev == null || score > prev.second) {
+                    scoreByKey[entry.key] = (prev?.first ?: canon) to score
                 }
-            )
+            }
+        }
+
+        val ordered = scoreByKey.values
+            .sortedByDescending { it.second }
+            .map { it.first }
             .take(maxTerms)
         return ArrayList(ordered)
     }

@@ -127,6 +127,22 @@ class TranscriptNormalizerTest {
         val biasing = TranscriptNormalizer.biasingTerms()
         assertTrue(biasing.contains("OKRs"))
         assertTrue(biasing.contains("TK"))
+
+        val ctx = ContextLanguageModel.fromDto(
+            ContextIndexPayloadDto(
+                unigrams = mapOf(
+                    "claude" to ContextUnigramDto(w = 17.85, c = "Claude"),
+                    "chatgpt" to ContextUnigramDto(w = 2.9, c = "ChatGPT"),
+                ),
+            ),
+        )
+        val mergedBias = TranscriptNormalizer.biasingTerms(
+            customVocabularyRaw = "Noory",
+            maxTerms = 60,
+            contextIndex = ctx,
+        )
+        assertTrue(mergedBias.contains("ChatGPT"))
+        assertTrue(mergedBias.contains("Claude"))
     }
 
     @Test

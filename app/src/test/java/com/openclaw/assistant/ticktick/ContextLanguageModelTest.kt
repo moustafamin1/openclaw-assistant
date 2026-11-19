@@ -185,4 +185,25 @@ class ContextLanguageModelTest {
         assertEquals(2.0, merged.unigramWeight("tooling"), 0.0001)
         assertEquals(15.0, merged.bigramWeight("noory", "app"), 0.0001)
     }
+
+    @Test
+    fun voicingNeutralBucketsMatchPlosivePairsLikeCluteClaudeAndGbtGpt() {
+        val ctx = ContextLanguageModel.fromDto(
+            ContextIndexPayloadDto(
+                unigrams = mapOf(
+                    "gpt" to ContextUnigramDto(w = 12.0, c = "GPT"),
+                    "claude" to ContextUnigramDto(w = 18.0, c = "Claude"),
+                    "to" to ContextUnigramDto(w = 40.0, c = "to"),
+                ),
+                bigrams = mapOf(
+                    "to claude" to 4.0,
+                ),
+            ),
+        )
+
+        assertEquals(
+            "Migrate to Claude and GPT",
+            TranscriptNormalizer.normalize("migrate to Clute and gbt", "TickTick", ctx),
+        )
+    }
 }

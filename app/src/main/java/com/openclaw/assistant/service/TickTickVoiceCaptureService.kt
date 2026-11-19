@@ -73,6 +73,7 @@ class TickTickVoiceCaptureService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var captureJob: Job? = null
+    private var startCueJob: Job? = null
     private var pausedHotword = false
 
     private val isRecording = AtomicBoolean(false)
@@ -109,6 +110,25 @@ class TickTickVoiceCaptureService : Service() {
         }
     }
 
+    internal fun isPartialBufferReset(prev: String, curr: String): Boolean {
+        if (prev.length < 12 || curr.isBlank()) return false
+        val prevWords = prev.lowercase(Locale.ROOT)
+            .split(Regex("\\s+"))
+            .map { it.trim('.', ',', '!', '?', ':', ';', '"') }
+            .filter { it.length >= 2 }
+        val currWords = curr.lowercase(Locale.ROOT)
+            .split(Regex("\\s+"))
+            .map { it.trim('.', ',', '!', '?', ':', ';', '"') }
+            .filter { it.length >= 2 }
+        if (prevWords.size < 3 || curr.length >= (prev.length * 0.45).toInt()) return false
+        val hasOverlap = prevWords.any { pw ->
+            pw.length >= 3 && currWords.any { cw ->
+                cw.startsWith(pw.take(3)) || pw.startsWith(cw.take(3))
+            }
+        }
+        return !hasOverlap
+    }
+
     override fun onCreate() {
         super.onCreate()
         settings = SettingsRepository.getInstance(this)
@@ -133,6 +153,8 @@ class TickTickVoiceCaptureService : Service() {
     override fun onDestroy() {
         isRecording.set(false)
         activeRecording.set(false)
+        startCueJob?.cancel()
+        startCueJob = null
         stopListeningDispatched = null
         stopActiveAudioRecord()
         cleanupAndroidRecognizer()
@@ -234,6 +256,7 @@ class TickTickVoiceCaptureService : Service() {
         activeRecording.set(false)
 
         if (cancel) {
+            startCueJob?.cancel()
             stopActiveAudioRecord()
             stopListeningDispatched?.complete(Unit)
             captureJob?.cancel()
@@ -244,6 +267,8 @@ class TickTickVoiceCaptureService : Service() {
             stopSelf()
             return
         }
+
+        startCueJob?.cancel()
 
         // Flush 380ms of trailing audio before stopping STT/AudioRecord and playing ACK beep
         // so final syllables aren't clipped and the stop beep never leaks into the open mic.
@@ -266,9 +291,9 @@ class TickTickVoiceCaptureService : Service() {
         }
     }
 
-    private fun notifyMicStarted() {
+    private fun notifyMicStarted(playTone: Boolean = true) {
         triggerHaptic(START_HAPTIC_TIMINGS, START_HAPTIC_AMPLITUDES)
-        if (settings.tickTickAudioCue) {
+        if (playTone && settings.tickTickAudioCue) {
             scope.launch(Dispatchers.Main) {
                 playBeep(ToneGenerator.TONE_PROP_BEEP)
             }
@@ -446,6 +471,12 @@ class TickTickVoiceCaptureService : Service() {
             vocab to ctx
         }
 
+        val biasingStrings = TranscriptNormalizer.biasingTerms(
+            customVocabularyRaw = effectiveVocab,
+            maxTerms = 60,
+            contextIndex = contextIndex,
+        )
+
         fun buildRecognizerIntent(targetLang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -455,13 +486,14 @@ class TickTickVoiceCaptureService : Service() {
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
                     RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY,
                 )
+                if (biasingStrings.isNotEmpty()) {
+                    putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, biasingStrings)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && switchTags.size >= 2) {
                 putExtra(
@@ -475,7 +507,7 @@ class TickTickVoiceCaptureService : Service() {
             }
         }
 
-        Log.i(TAG, "Starting $engineLabel STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags")
+        Log.i(TAG, "Starting $engineLabel STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags bias=${biasingStrings.size}")
 
         val recognizer = withContext(Dispatchers.Main) {
             val created = if (useSystemSpeech) {
@@ -490,13 +522,24 @@ class TickTickVoiceCaptureService : Service() {
                         readyAtMs = SystemClock.elapsedRealtime()
                         Log.i(TAG, "onReadyForSpeech")
                         if (startedNotified.compareAndSet(false, true)) {
-                            notifyMicStarted()
+                            startCueJob?.cancel()
+                            startCueJob = scope.launch(Dispatchers.Main) {
+                                if (useSystemSpeech) {
+                                    // Wait for GoogleTTS's open chime & SODA pusher init before vibrating ready
+                                    delay(420L)
+                                }
+                                if (isRecording.get() && !captureCancelled) {
+                                    notifyMicStarted(playTone = !useSystemSpeech)
+                                }
+                            }
                         }
                     }
 
                     override fun onBeginningOfSpeech() {
                         sawBeginningOfSpeech = true
-                        Log.i(TAG, "onBeginningOfSpeech (+${SystemClock.elapsedRealtime() - readyAtMs}ms)")
+                        val delta = SystemClock.elapsedRealtime() - readyAtMs
+                        Log.i(TAG, "onBeginningOfSpeech (+${delta}ms)")
+                        appendDebugCaptureLog("onBeginningOfSpeech +${delta}ms")
                     }
 
                     override fun onRmsChanged(rmsdB: Float) {
@@ -512,16 +555,42 @@ class TickTickVoiceCaptureService : Service() {
                     override fun onEvent(eventType: Int, params: Bundle?) {}
 
                     override fun onPartialResults(partialResults: Bundle?) {
-                        val text = partialResults
+                        val stable = partialResults
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             ?.firstOrNull()
+                            ?.trim()
                             .orEmpty()
-                        if (text.isNotBlank()) {
+                        val unstable = partialResults
+                            ?.getStringArrayList("android.speech.extra.UNSTABLE_TEXT")
+                            ?.firstOrNull()
+                            ?.trim()
+                            .orEmpty()
+                        val combined = when {
+                            stable.isNotEmpty() && unstable.isNotEmpty() && !stable.endsWith(unstable, ignoreCase = true) ->
+                                "$stable $unstable".trim()
+                            stable.isNotEmpty() -> stable
+                            else -> unstable
+                        }
+                        if (combined.isNotBlank()) {
                             partialCount++
-                            if (partialCount <= 5) {
-                                Log.i(TAG, "onPartialResults #$partialCount=\"$text\"")
+                            if (partialCount <= 3 || partialCount % 8 == 0) {
+                                Log.i(TAG, "onPartialResults #$partialCount=\"$combined\"")
+                                appendDebugCaptureLog("partial #$partialCount=\"$combined\"")
                             }
-                            latestAndroidPartial = text
+                            val prev = latestAndroidPartial
+                            if (isPartialBufferReset(prev, combined)) {
+                                val committed = TranscriptNormalizer.selectBestHypothesis(
+                                    listOf(prev),
+                                    effectiveVocab,
+                                    contextIndex,
+                                )
+                                if (committed.isNotBlank() && sessionSegments.lastOrNull() != committed) {
+                                    sessionSegments.add(committed)
+                                    Log.i(TAG, "Committed reset partial segment=\"$committed\"")
+                                    appendDebugCaptureLog("partialReset committed=\"$committed\" next=\"$combined\"")
+                                }
+                            }
+                            latestAndroidPartial = combined
                         }
                     }
 
@@ -530,7 +599,9 @@ class TickTickVoiceCaptureService : Service() {
                             .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             ?.filter { it.isNotBlank() }
                             .orEmpty()
-                        Log.i(TAG, "onSegmentResults candidates=$candidates keys=${segmentResults.keySet()}")
+                        val keys = segmentResults.keySet()
+                        Log.i(TAG, "onSegmentResults candidates=$candidates keys=$keys")
+                        appendDebugCaptureLog("onSegmentResults candidates=$candidates keys=$keys")
                         if (candidates.isNotEmpty()) {
                             lastRawCandidates = candidates
                             lastResultMode = "onSegmentResults"
@@ -559,7 +630,9 @@ class TickTickVoiceCaptureService : Service() {
                         val bundleDebug = results?.keySet()?.joinToString(", ") { k ->
                             "$k=${results.get(k)?.toString()?.take(80)}"
                         } ?: "null"
-                        Log.i(TAG, "onResults candidates=$candidates bundle={$bundleDebug} lastPartial=\"$latestAndroidPartial\"")
+                        val msg = "onResults candidates=$candidates bundle={$bundleDebug} lastPartial=\"$latestAndroidPartial\""
+                        Log.i(TAG, msg)
+                        appendDebugCaptureLog(msg)
                         completedCleanly = true
                         if (candidates.isNotEmpty()) {
                             lastRawCandidates = candidates
@@ -574,7 +647,9 @@ class TickTickVoiceCaptureService : Service() {
                     }
 
                     override fun onError(error: Int) {
-                        Log.w(TAG, "Android on-device STT error: $error lastPartial=\"$latestAndroidPartial\"")
+                        val msg = "Android on-device STT error: $error lastPartial=\"$latestAndroidPartial\""
+                        Log.w(TAG, msg)
+                        appendDebugCaptureLog(msg)
                         completedCleanly = true
                         lastErrCode = error
                         val trailing = latestAndroidPartial.trim()
@@ -591,6 +666,7 @@ class TickTickVoiceCaptureService : Service() {
         try {
             while (isRecording.get() && !captureCancelled) {
                 latestAndroidPartial = ""
+                completedCleanly = false
                 val segDone = CompletableDeferred<Pair<String, Int?>>()
                 activeSegmentDeferred = segDone
                 val intent = buildRecognizerIntent(language)
@@ -994,7 +1070,7 @@ class TickTickVoiceCaptureService : Service() {
         private const val NOTIFICATION_RESULT_ID = 2402
         private const val WAKE_LOCK_TAG = "WakeHermesClaw::TickTickVoiceCapture"
         private const val DEBUG_CAPTURE_LOG_FILE = "ticktick_capture_debug.log"
-        private const val MAX_DEBUG_CAPTURE_LOG_LINES = 40
+        private const val MAX_DEBUG_CAPTURE_LOG_LINES = 100
         private val START_HAPTIC_TIMINGS = longArrayOf(0L, 75L)
         private val START_HAPTIC_AMPLITUDES = intArrayOf(0, 255)
         private val STOP_HAPTIC_TIMINGS = longArrayOf(0L, 30L, 45L, 45L)
