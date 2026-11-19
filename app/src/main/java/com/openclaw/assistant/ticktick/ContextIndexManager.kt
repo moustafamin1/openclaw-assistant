@@ -20,7 +20,8 @@ import java.util.concurrent.TimeUnit
 object ContextIndexManager {
     private const val BUNDLED_ASSET_NAME = "ticktick-context-index.json"
     private const val SYNCED_FILE_NAME = "ticktick_context_synced.json"
-    private const val LOCAL_FILE_NAME = "ticktick_context_local.json"
+    private const val LOCAL_FILE_NAME = "ticktick_context_local_v2.json"
+    private const val LEGACY_LOCAL_FILE_NAME = "ticktick_context_local.json"
     private const val MAX_LOCAL_UNIGRAMS = 1500
     private const val MAX_LOCAL_BIGRAMS = 2500
 
@@ -38,22 +39,38 @@ object ContextIndexManager {
         synchronized(lock) {
             cachedIndex?.let { return it }
             val appCtx = context.applicationContext
-            val bundled = readBundledAsset(appCtx)
-            val synced = readLocalFile(File(appCtx.filesDir, SYNCED_FILE_NAME))
+            runCatching {
+                val legacy = File(appCtx.filesDir, LEGACY_LOCAL_FILE_NAME)
+                if (legacy.exists()) legacy.delete()
+            }
+            val bundledAsset = readBundledAsset(appCtx)
+            val syncedAsset = readAssetFile(File(appCtx.filesDir, SYNCED_FILE_NAME))
+            val activeBase = when {
+                syncedAsset != null &&
+                    syncedAsset.contextIndex.unigrams.isNotEmpty() &&
+                    syncedAsset.version >= (bundledAsset?.version ?: 0L) -> syncedAsset.contextIndex
+                bundledAsset != null && bundledAsset.contextIndex.unigrams.isNotEmpty() -> bundledAsset.contextIndex
+                else -> syncedAsset?.contextIndex
+            }
             val local = readLocalFile(File(appCtx.filesDir, LOCAL_FILE_NAME))
-            return ContextLanguageModel.mergePayloads(bundled, synced, local).also {
+            return ContextLanguageModel.mergePayloads(activeBase, local).also {
                 cachedIndex = it
             }
         }
     }
 
-    fun saveSyncedIndex(context: Context, dto: ContextIndexPayloadDto?) {
+    fun saveSyncedIndex(
+        context: Context,
+        dto: ContextIndexPayloadDto?,
+        version: Long = System.currentTimeMillis() / 1000L,
+    ) {
         if (dto == null || dto.unigrams.isEmpty()) return
         val appCtx = context.applicationContext
         synchronized(lock) {
             runCatching {
+                val asset = StandaloneContextAssetDto(version = version, contextIndex = dto)
                 File(appCtx.filesDir, SYNCED_FILE_NAME)
-                    .writeText(ContextLanguageModel.encodePayload(dto))
+                    .writeText(ContextLanguageModel.encodeStandaloneAsset(asset))
             }
             cachedIndex = null
         }
@@ -135,8 +152,7 @@ object ContextIndexManager {
         val appCtx = context.applicationContext
         synchronized(lock) {
             val file = File(appCtx.filesDir, LOCAL_FILE_NAME)
-            val current = readLocalFile(file) ?: ContextIndexPayloadDto()
-            val updated = accumulateSentences(current, titles, weight = 1.2)
+            val updated = accumulateSentences(ContextIndexPayloadDto(), titles, weight = 0.8)
             runCatching {
                 file.writeText(ContextLanguageModel.encodePayload(updated))
             }
@@ -199,11 +215,18 @@ object ContextIndexManager {
         return ContextIndexPayloadDto(cappedUni, cappedBi)
     }
 
-    private fun readBundledAsset(context: Context): ContextIndexPayloadDto? {
+    private fun readBundledAsset(context: Context): StandaloneContextAssetDto? {
         return runCatching {
             context.assets.open(BUNDLED_ASSET_NAME).bufferedReader().use { reader ->
-                ContextLanguageModel.parseStandaloneJson(reader.readText())
+                ContextLanguageModel.parseStandaloneAsset(reader.readText())
             }
+        }.getOrNull()
+    }
+
+    private fun readAssetFile(file: File): StandaloneContextAssetDto? {
+        if (!file.exists()) return null
+        return runCatching {
+            ContextLanguageModel.parseStandaloneAsset(file.readText())
         }.getOrNull()
     }
 

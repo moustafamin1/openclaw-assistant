@@ -33,6 +33,7 @@ import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import com.openclaw.assistant.BuildConfig
 import com.openclaw.assistant.R
 import com.openclaw.assistant.SettingsActivity
 import com.openclaw.assistant.data.SettingsRepository
@@ -56,6 +57,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.vosk.Recognizer
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,10 +86,27 @@ class TickTickVoiceCaptureService : Service() {
     @Volatile private var lastStopHapticAtMs: Long = 0L
     @Volatile private var stopListeningDispatched: CompletableDeferred<Unit>? = null
     private val captureFinishedUnlocked = AtomicBoolean(false)
+    private val captureLogLock = Any()
 
     private fun setCaptureDiagnostic(value: String) {
         lastCaptureDiagnostic = value
         runCatching { settings.tickTickLastCaptureDiagnostic = value }
+        appendDebugCaptureLog(value)
+    }
+
+    private fun appendDebugCaptureLog(line: String) {
+        if (!BuildConfig.DEBUG) return
+        val entry = "${java.time.Instant.now()} | $line"
+        scope.launch(Dispatchers.IO + NonCancellable) {
+            runCatching {
+                synchronized(captureLogLock) {
+                    val logFile = File(filesDir, DEBUG_CAPTURE_LOG_FILE)
+                    val existing = if (logFile.exists()) logFile.readLines() else emptyList()
+                    val updated = (existing + entry).takeLast(MAX_DEBUG_CAPTURE_LOG_LINES)
+                    logFile.writeText(updated.joinToString("\n", postfix = "\n"))
+                }
+            }
+        }
     }
 
     override fun onCreate() {
@@ -974,6 +993,8 @@ class TickTickVoiceCaptureService : Service() {
         private const val NOTIFICATION_CAPTURE_ID = 2401
         private const val NOTIFICATION_RESULT_ID = 2402
         private const val WAKE_LOCK_TAG = "WakeHermesClaw::TickTickVoiceCapture"
+        private const val DEBUG_CAPTURE_LOG_FILE = "ticktick_capture_debug.log"
+        private const val MAX_DEBUG_CAPTURE_LOG_LINES = 40
         private val START_HAPTIC_TIMINGS = longArrayOf(0L, 75L)
         private val START_HAPTIC_AMPLITUDES = intArrayOf(0, 255)
         private val STOP_HAPTIC_TIMINGS = longArrayOf(0L, 30L, 45L, 45L)

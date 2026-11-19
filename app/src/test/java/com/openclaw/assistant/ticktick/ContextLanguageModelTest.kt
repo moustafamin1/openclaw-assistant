@@ -111,4 +111,78 @@ class ContextLanguageModelTest {
             TranscriptNormalizer.normalize("check taskiyah bug", "TickTick", idx),
         )
     }
+
+    @Test
+    fun doesNotCollapseFunctionWordPhrasesLikeTheLongOrAReport() {
+        val idx = ContextLanguageModel.fromDto(
+            ContextIndexPayloadDto(
+                unigrams = mapOf(
+                    "tooling" to ContextUnigramDto(w = 4.0, c = "tooling"),
+                    "airport" to ContextUnigramDto(w = 12.6, c = "airport"),
+                    "after" to ContextUnigramDto(w = 27.95, c = "after"),
+                    "accrued" to ContextUnigramDto(w = 4.0, c = "accrued"),
+                    "long" to ContextUnigramDto(w = 17.7, c = "long"),
+                    "report" to ContextUnigramDto(w = 16.25, c = "report"),
+                    "noory" to ContextUnigramDto(w = 148.0, c = "Noory"),
+                    "app" to ContextUnigramDto(w = 100.0, c = "app"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "Study the long onboarding for Noory app and compile a report, including all the findings, including video, screenshots.",
+            TranscriptNormalizer.normalize(
+                "Study the long onboarding for Noory app and compile a report, including all the findings, including video, screenshots.",
+                "Noory",
+                idx,
+            ),
+        )
+        assertEquals(
+            "Build a feature and add a card",
+            TranscriptNormalizer.normalize("build a feature and add a card", "TickTick", idx),
+        )
+    }
+
+    @Test
+    fun doesNotHijackEverydayEnglishWordsWithoutContext() {
+        val idx = ContextLanguageModel.fromDto(
+            ContextIndexPayloadDto(
+                unigrams = mapOf(
+                    "broad" to ContextUnigramDto(w = 10.0, c = "broad"),
+                    "better" to ContextUnigramDto(w = 26.5, c = "better"),
+                    "past" to ContextUnigramDto(w = 12.0, c = "past"),
+                    "solid" to ContextUnigramDto(w = 10.0, c = "solid"),
+                    "total" to ContextUnigramDto(w = 53.8, c = "total"),
+                    "message" to ContextUnigramDto(w = 10.0, c = "message"),
+                    "short" to ContextUnigramDto(w = 20.9, c = "short"),
+                    "show" to ContextUnigramDto(w = 12.0, c = "show"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "Buy bread and butter, pasta, salad, towel, massage, shirt and shoes",
+            TranscriptNormalizer.normalize(
+                "Buy bread and butter, pasta, salad, towel, massage, shirt and shoes",
+                "TickTick",
+                idx,
+            ),
+        )
+    }
+
+    @Test
+    fun mergePayloadsUsesMaxWeightWithoutDoubleCounting() {
+        val layer1 = ContextIndexPayloadDto(
+            unigrams = mapOf("tooling" to ContextUnigramDto(w = 2.0, c = "tooling")),
+            bigrams = mapOf("noory app" to 15.0),
+        )
+        val layer2 = ContextIndexPayloadDto(
+            unigrams = mapOf("tooling" to ContextUnigramDto(w = 2.0, c = "tooling")),
+            bigrams = mapOf("noory app" to 15.0),
+        )
+
+        val merged = ContextLanguageModel.mergePayloads(layer1, layer2)
+        assertEquals(2.0, merged.unigramWeight("tooling"), 0.0001)
+        assertEquals(15.0, merged.bigramWeight("noory", "app"), 0.0001)
+    }
 }

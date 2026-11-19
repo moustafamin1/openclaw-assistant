@@ -36,6 +36,7 @@ sealed class GlossarySyncOutcome {
         val count: Int,
         val formattedText: String,
         val contextIndex: ContextIndexPayloadDto? = null,
+        val version: Long = 0L,
     ) : GlossarySyncOutcome()
 
     data class Failure(val reason: String) : GlossarySyncOutcome()
@@ -59,7 +60,8 @@ class GlossarySyncClient(
         when (outcome) {
             is GlossarySyncOutcome.Success -> {
                 settings.tickTickSyncedGlossary = outcome.formattedText
-                ContextIndexManager.saveSyncedIndex(context, outcome.contextIndex)
+                val version = outcome.version.takeIf { it > 0L } ?: (System.currentTimeMillis() / 1000L)
+                ContextIndexManager.saveSyncedIndex(context, outcome.contextIndex, version)
                 val ticktickTasksSynced = runCatching {
                     ContextIndexManager.syncActiveTickTickProjects(context, settings.tickTickAccessToken, baseClient)
                 }.getOrDefault(0)
@@ -89,12 +91,13 @@ class GlossarySyncClient(
                 timeoutMs = 2500L,
                 authToken = ""
             )
-            primaryResult.onSuccess { (entries, ctx) ->
+            primaryResult.onSuccess { (entries, ctx, version) ->
                 return@withContext GlossarySyncOutcome.Success(
                     sourceLabel = "Mac Bridge",
                     count = entries.size,
                     formattedText = formatEntries(entries),
                     contextIndex = ctx,
+                    version = version,
                 )
             }.onFailure { err ->
                 errors += "Mac: ${err.message ?: err.javaClass.simpleName}"
@@ -108,12 +111,13 @@ class GlossarySyncClient(
                 timeoutMs = 10000L,
                 authToken = authToken.trim()
             )
-            fallbackResult.onSuccess { (entries, ctx) ->
+            fallbackResult.onSuccess { (entries, ctx, version) ->
                 return@withContext GlossarySyncOutcome.Success(
                     sourceLabel = "GitHub Fallback",
                     count = entries.size,
                     formattedText = formatEntries(entries),
                     contextIndex = ctx,
+                    version = version,
                 )
             }.onFailure { err ->
                 errors += "GitHub: ${err.message ?: err.javaClass.simpleName}"
@@ -131,7 +135,7 @@ class GlossarySyncClient(
         url: String,
         timeoutMs: Long,
         authToken: String
-    ): Result<Pair<List<GlossaryEntryDto>, ContextIndexPayloadDto?>> = runCatching {
+    ): Result<Triple<List<GlossaryEntryDto>, ContextIndexPayloadDto?, Long>> = runCatching {
         val client = baseClient.newBuilder()
             .connectTimeout(timeoutMs, TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -162,9 +166,10 @@ class GlossarySyncClient(
     internal fun parseGlossaryJson(rawJson: String): List<GlossaryEntryDto> =
         parseGlossaryPayload(rawJson).first
 
-    internal fun parseGlossaryPayload(rawJson: String): Pair<List<GlossaryEntryDto>, ContextIndexPayloadDto?> {
+    internal fun parseGlossaryPayload(rawJson: String): Triple<List<GlossaryEntryDto>, ContextIndexPayloadDto?, Long> {
         val root: JsonElement = json.parseToJsonElement(rawJson)
         var parsedContext: ContextIndexPayloadDto? = null
+        var parsedVersion = 0L
         val rawEntries = when (root) {
             is JsonObject -> {
                 if (!root.containsKey("entries")) {
@@ -172,6 +177,7 @@ class GlossarySyncClient(
                 }
                 val dto = json.decodeFromJsonElement<GlossaryPayloadDto>(root)
                 parsedContext = dto.contextIndex
+                parsedVersion = dto.version
                 dto.entries
             }
             is JsonArray -> root.mapNotNull { elem ->
@@ -195,7 +201,7 @@ class GlossarySyncClient(
                     .distinct()
                 GlossaryEntryDto(term = cleanTerm, aliases = cleanAliases)
             }
-        return cleaned to parsedContext
+        return Triple(cleaned, parsedContext, parsedVersion)
     }
 
     internal fun formatEntries(entries: List<GlossaryEntryDto>): String {

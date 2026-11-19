@@ -46,9 +46,6 @@ class TickTickCaptureRepository(
         val cleanTitle = cleanTranscript(rawTranscript, settings.effectiveTickTickVocabulary(), contextIndex)
         if (cleanTitle.isEmpty()) return@withContext CaptureSaveOutcome.IgnoredBlank
 
-        // Reinforce local offline unigram/bigram index immediately upon capture
-        ContextIndexManager.recordSentence(appContext, cleanTitle)
-
         val rowId = dao.insert(
             PendingTickTickTaskEntity(
                 title = cleanTitle,

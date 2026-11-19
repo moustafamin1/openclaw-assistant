@@ -120,8 +120,10 @@ class ContextIndex(
             // 1. Apply mixed/acronym/high-confidence proper casing when word is already in context
             val exactUni = unigrams[lowerCore]
             if (exactUni != null && exactUni.canonical != lowerCore) {
-                val isAcronymOrMixed = Regex(".*(?:[A-Z]{2,}|[a-z][A-Z]).*").matches(exactUni.canonical)
-                if (isAcronymOrMixed || (exactUni.weight >= 12.0 && lowerCore !in protectedCommonWords)) {
+                val isAcronymOrMixed = ContextLanguageModel.isAcronymOrMixed(exactUni.canonical)
+                if (isAcronymOrMixed ||
+                    (exactUni.weight >= 12.0 && lowerCore !in protectedCommonWords && lowerCore !in FUNCTION_WORDS)
+                ) {
                     tokens[i] = "$lead${exactUni.canonical}$trail"
                 }
             }
@@ -133,7 +135,7 @@ class ContextIndex(
             val nextIsStrong = nextLower != null && unigramWeight(nextLower) >= 4.0
             val currNextBi = bigramWeight(lowerCore, nextLower)
 
-            val outOfContext = rawUniW < 0.8 && lowerCore !in protectedCommonWords
+            val outOfContext = rawUniW < 0.8 && lowerCore !in protectedCommonWords && lowerCore !in FUNCTION_WORDS
             val neighborPullMismatch = (prevIsStrong && prevNextBi == 0.0) || (nextIsStrong && currNextBi == 0.0)
             if (!outOfContext && !neighborPullMismatch) continue
 
@@ -155,18 +157,29 @@ class ContextIndex(
                     if (!seenCandidates.add(cand.key) || cand.key == lowerCore) continue
 
                     val sim = ContextLanguageModel.combinedSimilarity(lowerCore, cand.key)
-                    val pairPull = max(bigramWeight(prevLower, cand.key), bigramWeight(cand.key, nextLower))
+                    val prevCandBi = if (prevLower != null) bigramWeight(prevLower, cand.key) else 0.0
+                    val nextCandBi = if (nextLower != null) bigramWeight(cand.key, nextLower) else 0.0
+                    val contentPairPull = max(
+                        if (prevLower != null && prevLower !in FUNCTION_WORDS) prevCandBi else 0.0,
+                        if (nextLower != null && nextLower !in FUNCTION_WORDS) nextCandBi else 0.0,
+                    )
+                    val funcPairPull = max(
+                        if (prevLower != null && prevLower in FUNCTION_WORDS) prevCandBi else 0.0,
+                        if (nextLower != null && nextLower in FUNCTION_WORDS) nextCandBi else 0.0,
+                    )
 
-                    // Never hijack common glue words unless neighbor bigram strongly expects cand
-                    val allowedByTrigger = if (lowerCore in protectedCommonWords || rawUniW >= 0.8) {
-                        pairPull >= 2.0 && sim >= 0.56
+                    // Never hijack common/unknown English words without strong content-word context or domain entity evidence
+                    val allowedByTrigger = if (lowerCore in protectedCommonWords || lowerCore in FUNCTION_WORDS || rawUniW >= 0.8) {
+                        contentPairPull >= 2.5 && sim >= 0.56
                     } else {
-                        (sim >= 0.72 && cand.weight >= 3.5) || (sim >= 0.58 && pairPull >= 2.0)
+                        (contentPairPull >= 2.0 && sim >= 0.62) ||
+                            (ContextLanguageModel.isDomainEntity(cand) && funcPairPull >= 3.0 && sim >= 0.72) ||
+                            ((ContextLanguageModel.isAcronymOrMixed(cand.canonical) || ContextLanguageModel.hasGermanUmlaut(cand.canonical)) && sim >= 0.78 && cand.weight >= 5.0)
                     }
                     if (!allowedByTrigger) continue
 
                     val candCtxScore = ln(1.0 + cand.weight) +
-                        2.5 * (ln(1.0 + bigramWeight(prevLower, cand.key)) + ln(1.0 + bigramWeight(cand.key, nextLower)))
+                        2.5 * (ln(1.0 + prevCandBi) + ln(1.0 + nextCandBi))
                     val improvement = candCtxScore - rawCtxScore
                     val totalScore = improvement + sim * 2.5
 
@@ -227,14 +240,8 @@ class ContextIndex(
                 val letterJoined = ContextLanguageModel.joinSpokenLetters(lowers)
                 if (winSize == 3 && letterJoined == null) continue
 
-                // Skip known frequent 2-word phrases and pure common-word pairs
-                if (winSize == 2 && letterJoined == null) {
-                    if (bigramWeight(lowers[0], lowers[1]) >= 1.5) continue
-                    if (lowers[0] in protectedCommonWords && lowers[1] in protectedCommonWords) continue
-                }
-
                 val joined = lowers.joinToString("")
-                val winner = findSplitMatch(joined, letterJoined)
+                val winner = findSplitMatch(lowers, joined, letterJoined, protectedCommonWords)
                 if (winner != null) {
                     val outText = if (winner.canonical != winner.key) winner.canonical else winner.key
                     out += "${firstParts.first}$outText${lastParts.third}"
@@ -252,13 +259,41 @@ class ContextIndex(
         tokens.addAll(out)
     }
 
-    private fun findSplitMatch(joined: String, letterJoined: String?): ContextUnigram? {
-        if (letterJoined != null) {
+    private fun findSplitMatch(
+        lowers: List<String>,
+        joined: String,
+        letterJoined: String?,
+        protectedCommonWords: Set<String>,
+    ): ContextUnigram? {
+        // Path A: Spoken letters (e.g. "ay pee kay" -> APK, "tee kay" -> TK)
+        if (letterJoined != null && !(lowers.size == 2 && lowers[0] == "a")) {
             val exactLetters = unigrams[letterJoined]
-            if (exactLetters != null && exactLetters.weight >= 2.0) return exactLetters
+            if (exactLetters != null &&
+                exactLetters.weight >= 2.0 &&
+                ContextLanguageModel.isAcronymOrMixed(exactLetters.canonical)
+            ) {
+                return exactLetters
+            }
         }
+
+        // Path B/C: 2-word non-acronym joins — never merge across function words, frequent bigrams, or known word pairs
+        if (lowers.size != 2) return null
+        if (lowers[0] in FUNCTION_WORDS || lowers[1] in FUNCTION_WORDS) return null
+        if (bigramWeight(lowers[0], lowers[1]) >= 1.5) return null
+        if (lowers[0] in protectedCommonWords && lowers[1] in protectedCommonWords) return null
+
+        val w0 = unigramWeight(lowers[0])
+        val w1 = unigramWeight(lowers[1])
         val exactJoined = unigrams[joined]
-        if (exactJoined != null && exactJoined.weight >= 2.0) return exactJoined
+        if (exactJoined != null &&
+            exactJoined.weight >= 2.0 &&
+            (!(w0 >= 3.0 && w1 >= 3.0) || ContextLanguageModel.isAcronymOrMixed(exactJoined.canonical)) &&
+            (ContextLanguageModel.isDomainEntity(exactJoined) || exactJoined.key.length >= 8)
+        ) {
+            return exactJoined
+        }
+
+        if ((w0 >= 2.0 && w1 >= 2.0) || w1 >= 5.0) return null
 
         val joinedCode = ContextLanguageModel.phoneticCode(joined)
         val bucket = phoneticBuckets[joinedCode] ?: return null
@@ -267,12 +302,16 @@ class ContextIndex(
         for (cand in bucket) {
             if (cand.weight < 3.5) continue
             if (ContextLanguageModel.phoneticCode(cand.key) != joinedCode) continue
+            val isAcronym = ContextLanguageModel.isAcronymOrMixed(cand.canonical)
+            val isLongProper = cand.canonical != cand.key && cand.key.length >= 8 && cand.key !in FUNCTION_WORDS
+            if (!isAcronym && !isLongProper) continue
             val charSim = TranscriptNormalizer.normalizedSimilarity(
                 TranscriptNormalizer.foldGermanUmlauts(joined),
                 TranscriptNormalizer.foldGermanUmlauts(cand.key),
             )
-            if (charSim < 0.45) continue
-            val acronymBonus = if (cand.canonical != cand.key) 1.5 else 0.0
+            val minSim = if (isAcronym) 0.48 else 0.65
+            if (charSim < minSim) continue
+            val acronymBonus = if (isAcronym) 1.5 else 0.0
             val score = ln(1.0 + cand.weight) + charSim * 3.0 + acronymBonus
             if (score > bestScore) {
                 bestScore = score
@@ -284,6 +323,18 @@ class ContextIndex(
 
     companion object {
         val EMPTY = ContextIndex(emptyMap(), emptyMap())
+
+        val FUNCTION_WORDS = setOf(
+            "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "can",
+            "could", "did", "do", "does", "for", "from", "had", "has", "have", "he", "her",
+            "here", "him", "his", "how", "i", "if", "in", "into", "is", "it", "its", "may",
+            "me", "might", "more", "most", "must", "my", "no", "nor", "not", "now", "of",
+            "off", "on", "one", "only", "or", "other", "our", "out", "over", "own", "same",
+            "shall", "she", "should", "so", "some", "such", "than", "that", "the", "their",
+            "them", "then", "there", "these", "they", "this", "those", "through", "to", "too",
+            "under", "up", "us", "very", "was", "we", "were", "what", "when", "where",
+            "which", "while", "who", "whom", "why", "will", "with", "would", "you", "your",
+        )
 
         val DEFAULT_PROTECTED_WORDS = setOf(
             "a", "an", "and", "are", "as", "at", "be", "being", "been", "but", "by", "can",
@@ -307,6 +358,17 @@ object ContextLanguageModel {
         isLenient = true
     }
 
+    private val ACRONYM_OR_MIXED_REGEX = Regex(".*(?:[A-Z]{2,}|[a-z][A-Z]).*")
+
+    fun isAcronymOrMixed(canonical: String): Boolean = ACRONYM_OR_MIXED_REGEX.matches(canonical)
+
+    fun hasGermanUmlaut(text: String): Boolean = text.any { it in "äöüßÄÖÜ" }
+
+    fun isDomainEntity(cand: ContextUnigram): Boolean =
+        isAcronymOrMixed(cand.canonical) ||
+            hasGermanUmlaut(cand.canonical) ||
+            (cand.canonical != cand.key && cand.key !in ContextIndex.FUNCTION_WORDS)
+
     fun fromDto(dto: ContextIndexPayloadDto): ContextIndex {
         if (dto.unigrams.isEmpty()) return ContextIndex.EMPTY
         val uniMap = HashMap<String, ContextUnigram>(dto.unigrams.size)
@@ -326,18 +388,28 @@ object ContextLanguageModel {
         return ContextIndex(uniMap, biMap)
     }
 
-    fun parseStandaloneJson(rawJson: String): ContextIndexPayloadDto? {
+    fun parseStandaloneAsset(rawJson: String): StandaloneContextAssetDto? {
         if (rawJson.isBlank()) return null
         return runCatching {
             val trimmed = rawJson.trim()
             val asset = json.decodeFromString<StandaloneContextAssetDto>(trimmed)
             if (asset.contextIndex.unigrams.isNotEmpty()) {
-                asset.contextIndex
+                asset
             } else {
-                json.decodeFromString<ContextIndexPayloadDto>(trimmed)
+                val payload = json.decodeFromString<ContextIndexPayloadDto>(trimmed)
+                if (payload.unigrams.isNotEmpty()) {
+                    StandaloneContextAssetDto(version = 0L, contextIndex = payload)
+                } else {
+                    null
+                }
             }
         }.getOrNull()
     }
+
+    fun parseStandaloneJson(rawJson: String): ContextIndexPayloadDto? =
+        parseStandaloneAsset(rawJson)?.contextIndex
+
+    fun encodeStandaloneAsset(asset: StandaloneContextAssetDto): String = json.encodeToString(asset)
 
     fun encodePayload(dto: ContextIndexPayloadDto): String = json.encodeToString(dto)
 
@@ -355,15 +427,16 @@ object ContextLanguageModel {
                     ContextUnigramDto(w = v.w, c = v.c.ifEmpty { key })
                 } else {
                     ContextUnigramDto(
-                        w = existing.w + v.w,
-                        c = if (v.w >= existing.w && v.c.isNotEmpty()) v.c else existing.c,
+                        w = max(existing.w, v.w),
+                        c = if (v.w > existing.w && v.c.isNotEmpty()) v.c else existing.c,
                     )
                 }
             }
             for ((pair, w) in layer.bigrams) {
                 val cleanPair = pair.trim().lowercase(Locale.ROOT)
                 if (cleanPair.contains(' ')) {
-                    mergedBi[cleanPair] = (mergedBi[cleanPair] ?: 0.0) + w
+                    val prev = mergedBi[cleanPair]
+                    mergedBi[cleanPair] = if (prev == null) w else max(prev, w)
                 }
             }
         }
