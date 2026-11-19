@@ -160,8 +160,9 @@ class TickTickVoiceCaptureService : Service() {
         activeRecording.set(true)
 
         val useAndroidOnDevice = settings.tickTickSpeechEngine == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+            (SpeechRecognizer.isRecognitionAvailable(this) ||
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    SpeechRecognizer.isOnDeviceRecognitionAvailable(this)))
 
         captureJob = scope.launch {
             try {
@@ -388,8 +389,12 @@ class TickTickVoiceCaptureService : Service() {
     }
 
     private suspend fun captureWithAndroidOnDeviceStt(): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        val useSystemSpeech = SpeechRecognizer.isRecognitionAvailable(this)
+        val hasOnDeviceFallback = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+        if (!useSystemSpeech && !hasOnDeviceFallback) return null
 
+        val engineLabel = if (useSystemSpeech) "Google-Speech" else "Google-OnDevice"
         val multiLangEnabled = settings.tickTickMultiLangSwitch
         val sessionSegments = java.util.Collections.synchronizedList(mutableListOf<String>())
         val startedNotified = AtomicBoolean(false)
@@ -409,22 +414,20 @@ class TickTickVoiceCaptureService : Service() {
         } else {
             emptyList()
         }
-        val (effectiveVocab, contextIndex, biasingList) = withContext(Dispatchers.IO) {
+        val (effectiveVocab, contextIndex) = withContext(Dispatchers.IO) {
             val vocab = settings.effectiveTickTickVocabulary()
             val ctx = ContextIndexManager.getIndex(applicationContext)
-            // Keep EXTRA_BIASING_STRINGS tight (top 25) so unrelated words never steal beam probability from normal English.
-            val biasing = TranscriptNormalizer.biasingTerms(vocab, maxTerms = 25)
-            Triple(vocab, ctx, biasing)
+            vocab to ctx
         }
 
         fun buildRecognizerIntent(targetLang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, targetLang)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, targetLang)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
-            // AiAi reads silence extras via Intent.getIntExtra() — pass Int (not Long) to avoid ClassCastException -> 0.
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_000)
@@ -433,9 +436,6 @@ class TickTickVoiceCaptureService : Service() {
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
                     RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY,
                 )
-                if (biasingList.isNotEmpty()) {
-                    putStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS, biasingList)
-                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && switchTags.size >= 2) {
                 putExtra(
@@ -449,10 +449,15 @@ class TickTickVoiceCaptureService : Service() {
             }
         }
 
-        Log.i(TAG, "Starting Google On-Device STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags biasing=${biasingList.size}")
+        Log.i(TAG, "Starting $engineLabel STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags")
 
         val recognizer = withContext(Dispatchers.Main) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(this@TickTickVoiceCaptureService).also { rec ->
+            val created = if (useSystemSpeech) {
+                SpeechRecognizer.createSpeechRecognizer(this@TickTickVoiceCaptureService)
+            } else {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(this@TickTickVoiceCaptureService)
+            }
+            created.also { rec ->
                 androidRecognizer = rec
                 rec.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
@@ -487,6 +492,9 @@ class TickTickVoiceCaptureService : Service() {
                             .orEmpty()
                         if (text.isNotBlank()) {
                             partialCount++
+                            if (partialCount <= 5) {
+                                Log.i(TAG, "onPartialResults #$partialCount=\"$text\"")
+                            }
                             latestAndroidPartial = text
                         }
                     }
@@ -515,6 +523,7 @@ class TickTickVoiceCaptureService : Service() {
                         val candidates = results
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                             .orEmpty()
+                        Log.i(TAG, "onResults candidates=$candidates")
                         lastRawCandidates = candidates
                         lastResultMode = if (candidates.isNotEmpty()) "onResults(Pass2)" else "partial-empty-res"
                         val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
@@ -620,9 +629,9 @@ class TickTickVoiceCaptureService : Service() {
         val errSuffix = lastErrCode?.let { " err=$it" }.orEmpty()
         val micStats = "bos=$sawBeginningOfSpeech partials=$partialCount rms=${String.format(Locale.US, "%.1f", peakRms)}"
         val diag = if (shouldFallbackToVosk) {
-            "Google-OnDevice FAILED($language$errSuffix $micStats)"
+            "$engineLabel FAILED($language$errSuffix $micStats)"
         } else {
-            "Google-OnDevice($language, $lastResultMode, bias=${biasingList.size} $micStats$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
+            "$engineLabel($language, $lastResultMode, $micStats$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
         }
         setCaptureDiagnostic(diag)
         Log.i(TAG, "Capture diagnostic: $lastCaptureDiagnostic")
