@@ -5,7 +5,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("kotlin-kapt")
+    id("com.google.devtools.ksp")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.gms.google-services")
     id("com.google.firebase.crashlytics")
@@ -127,7 +127,8 @@ android {
     kotlinOptions {
         jvmTarget = "17"
         freeCompilerArgs += listOf(
-            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api"
+            "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
+            "-Xskip-metadata-version-check",
         )
     }
     buildFeatures {
@@ -139,10 +140,13 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
             excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
+        jniLibs {
+            pickFirsts.add("**/liblitertlm_jni.so")
+        }
     }
 
     androidResources {
-        noCompress += listOf("onnx", "ort")
+        noCompress += listOf("onnx", "ort", "litertlm")
     }
 
     lint {
@@ -203,6 +207,9 @@ dependencies {
 
     // Vosk
     implementation("com.alphacephei:vosk-android:0.3.75")
+
+    // LiteRT-LM (On-device Gemma 4 E2B multimodal audio)
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.19.1")
     
     // VOICEVOX (full flavor only)
     // libvoicevox_onnxruntime.so (VoiceVox custom ORT v1.17.3) is bundled in
@@ -259,10 +266,10 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     // Room
-    val roomVersion = "2.6.1"
+    val roomVersion = "2.8.5"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
-    kapt("androidx.room:room-compiler:$roomVersion")
+    ksp("androidx.room:room-compiler:$roomVersion")
 
     // Firebase
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))

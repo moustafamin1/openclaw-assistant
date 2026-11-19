@@ -135,6 +135,7 @@ object TranscriptNormalizer {
         rawTranscript: String,
         customVocabularyRaw: String = DEFAULT_RAW_VOCABULARY,
         contextIndex: ContextIndex? = null,
+        skipContextRewrite: Boolean = false,
     ): String {
         var text = rawTranscript.trim().replace(Regex("\\s+"), " ")
         if (text.isEmpty()) return ""
@@ -205,11 +206,15 @@ object TranscriptNormalizer {
         val singleWordTerms = lexicon.terms.filter { !it.contains(' ') }
         val multiWordTerms = lexicon.terms.filter { it.contains(' ') }
         val compoundSingleTerms = singleWordTerms.filter { it.length >= 7 }
-        val tokens = applyMultiWordPhoneticWindow(
-            tokens = text.split(' '),
-            multiWordTerms = multiWordTerms,
-            compoundSingleTerms = compoundSingleTerms,
-        ).toMutableList()
+        val tokens = if (skipContextRewrite) {
+            text.split(' ').toMutableList()
+        } else {
+            applyMultiWordPhoneticWindow(
+                tokens = text.split(' '),
+                multiWordTerms = multiWordTerms,
+                compoundSingleTerms = compoundSingleTerms,
+            ).toMutableList()
+        }
 
         for (i in tokens.indices) {
             val token = tokens[i]
@@ -266,17 +271,19 @@ object TranscriptNormalizer {
             }
 
             // 3c. Phonetic + edit-distance match (Latin/German words only; preserve Arabic/non-Latin scripts verbatim)
-            val isLatinToken = core.any { it in 'A'..'Z' || it in 'a'..'z' || it in "äöüßÄÖÜ" }
-            if (isLatinToken && (inProjectContext || core.length >= 5) && lowerCore !in COMMON_STOP_WORDS) {
-                val bestMatch = findBestPhoneticMatch(lowerCore, singleWordTerms, strict = !inProjectContext)
-                if (bestMatch != null) {
-                    tokens[i] = "$leadingPunct$bestMatch$trailingPunct"
+            if (!skipContextRewrite) {
+                val isLatinToken = core.any { it in 'A'..'Z' || it in 'a'..'z' || it in "äöüßÄÖÜ" }
+                if (isLatinToken && (inProjectContext || core.length >= 5) && lowerCore !in COMMON_STOP_WORDS) {
+                    val bestMatch = findBestPhoneticMatch(lowerCore, singleWordTerms, strict = !inProjectContext)
+                    if (bestMatch != null) {
+                        tokens[i] = "$leadingPunct$bestMatch$trailingPunct"
+                    }
                 }
             }
         }
 
         // 3c.5. Offline Second Brain + TickTick phonetic & bigram context rescoring
-        if (contextIndex != null && !contextIndex.isEmpty()) {
+        if (!skipContextRewrite && contextIndex != null && !contextIndex.isEmpty()) {
             contextIndex.correctTokens(tokens)
         }
 

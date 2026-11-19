@@ -67,3 +67,7 @@
 -keep class com.openclaw.assistant.speech.OpenAIProvider { *; }
 -keep class com.openclaw.assistant.speech.OpenAIProvider$* { *; }
 -keep class com.openclaw.assistant.speech.AndroidTTSProvider { *; }
+
+# LiteRT-LM (Gemma 4 on-device runtime & JNI callbacks)
+-keep class com.google.ai.edge.litertlm.** { *; }
+-dontwarn com.google.ai.edge.litertlm.**

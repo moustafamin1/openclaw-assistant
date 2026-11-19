@@ -35,6 +35,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -70,6 +71,9 @@ import androidx.core.content.ContextCompat
 import com.openclaw.assistant.bridge.accessibility.AgentVoiceAccessibilityService
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.service.TickTickVoiceCaptureService
+import com.openclaw.assistant.ticktick.Gemma4AudioTranscriber
+import com.openclaw.assistant.ticktick.Gemma4DownloadState
+import com.openclaw.assistant.ticktick.Gemma4ModelManager
 import com.openclaw.assistant.ticktick.GlossarySyncClient
 import com.openclaw.assistant.ticktick.GlossarySyncOutcome
 import com.openclaw.assistant.ticktick.GlossarySyncScheduler
@@ -160,6 +164,12 @@ fun TickTickCaptureSettingsContent(
                 ?: TickTickVoiceCaptureService.lastCaptureDiagnostic,
         )
     }
+    val gemmaDownloadState by Gemma4ModelManager.downloadState.collectAsState()
+    var gemmaLoadedInRam by remember { mutableStateOf(Gemma4AudioTranscriber.isLoaded()) }
+
+    LaunchedEffect(Unit) {
+        Gemma4ModelManager.refreshState(context)
+    }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, context) {
@@ -173,6 +183,8 @@ fun TickTickCaptureSettingsContent(
                 keyDiagnostic = AgentVoiceAccessibilityService.lastVolumeDiagnostic
                 captureDiagnostic = settings.tickTickLastCaptureDiagnostic.takeIf { it != "No capture yet" }
                     ?: TickTickVoiceCaptureService.lastCaptureDiagnostic
+                Gemma4ModelManager.refreshState(context)
+                gemmaLoadedInRam = Gemma4AudioTranscriber.isLoaded()
                 ScreenOffVolumeKeyBridge.syncRegistration(context, force = true)
             }
         }
@@ -198,7 +210,7 @@ fun TickTickCaptureSettingsContent(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    "Setup Checklist (Zero LLM)",
+                    "Setup Checklist (100% Offline)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -450,6 +462,15 @@ fun TickTickCaptureSettingsContent(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     FilterChip(
+                        selected = speechEngine == SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO,
+                        onClick = {
+                            speechEngine = SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO
+                            settings.tickTickSpeechEngine = SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO
+                            Gemma4ModelManager.refreshState(context)
+                        },
+                        label = { Text("Gemma 4 E2B (Native Audio)") },
+                    )
+                    FilterChip(
                         selected = speechEngine == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE,
                         enabled = onDeviceGoogleSupported,
                         onClick = {
@@ -474,6 +495,96 @@ fun TickTickCaptureSettingsContent(
                         },
                         label = { Text("Vosk Offline (Fallback)") },
                     )
+                }
+
+                if (speechEngine == SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO ||
+                    gemmaDownloadState is Gemma4DownloadState.Downloading
+                ) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
+                        ),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            val statusLine = when (val st = gemmaDownloadState) {
+                                is Gemma4DownloadState.Ready -> {
+                                    val gb = String.format(Locale.US, "%.2f", st.sizeBytes / 1_000_000_000.0)
+                                    "Model Ready ($gb GB)${if (gemmaLoadedInRam) " • Loaded in RAM" else ""}"
+                                }
+                                is Gemma4DownloadState.Downloading -> {
+                                    val pct = if (st.totalBytes > 0L) ((st.downloadedBytes * 100L) / st.totalBytes).toInt() else 0
+                                    val mbDone = st.downloadedBytes / 1_048_576L
+                                    val mbTotal = (st.totalBytes.coerceAtLeast(1L)) / 1_048_576L
+                                    "Downloading $pct% ($mbDone / $mbTotal MB)"
+                                }
+                                is Gemma4DownloadState.Error -> "Download Error: ${st.message}"
+                                Gemma4DownloadState.NotDownloaded -> "Model Not Downloaded (~2.59 GB)"
+                            }
+                            Text(
+                                text = statusLine,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            val dl = gemmaDownloadState as? Gemma4DownloadState.Downloading
+                            if (dl != null) {
+                                val fraction = if (dl.totalBytes > 0L) {
+                                    (dl.downloadedBytes.toFloat() / dl.totalBytes.toFloat()).coerceIn(0f, 1f)
+                                } else {
+                                    0f
+                                }
+                                LinearProgressIndicator(
+                                    progress = { fraction },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                            Text(
+                                text = "100% offline • 0% idle CPU • auto-unloads after 90s",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                when (gemmaDownloadState) {
+                                    is Gemma4DownloadState.Downloading -> {
+                                        OutlinedButton(onClick = { Gemma4ModelManager.cancelDownload() }) {
+                                            Text("Cancel")
+                                        }
+                                    }
+                                    is Gemma4DownloadState.Ready -> {
+                                        if (gemmaLoadedInRam) {
+                                            OutlinedButton(
+                                                onClick = {
+                                                    Gemma4AudioTranscriber.unloadNow()
+                                                    gemmaLoadedInRam = false
+                                                },
+                                            ) {
+                                                Text("Unload RAM")
+                                            }
+                                        }
+                                        OutlinedButton(
+                                            onClick = {
+                                                Gemma4ModelManager.deleteModel(context)
+                                                gemmaLoadedInRam = false
+                                            },
+                                        ) {
+                                            Text("Delete Model")
+                                        }
+                                    }
+                                    else -> {
+                                        Button(onClick = { Gemma4ModelManager.startDownload(context) }) {
+                                            Text("Download Model (~2.59 GB)")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (speechEngine == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE && onDeviceGoogleSupported) {

@@ -206,4 +206,26 @@ class ContextLanguageModelTest {
             TranscriptNormalizer.normalize("migrate to Clute and gbt", "TickTick", ctx),
         )
     }
+
+    @Test
+    fun skipContextRewritePreservesCommonWordsAndFormatsHashtagsAndBrain() {
+        val ctx = ContextLanguageModel.fromDto(
+            ContextIndexPayloadDto(
+                unigrams = mapOf(
+                    "tooling" to ContextUnigramDto(w = 40.0, c = "tooling"),
+                    "airport" to ContextUnigramDto(w = 40.0, c = "airport"),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "@brain: Study long onboarding for Noory app and compile a report #urgent",
+            TranscriptNormalizer.normalize(
+                rawTranscript = "Brain study long onboarding for noory app and compile a report hashtag urgent",
+                customVocabularyRaw = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+                contextIndex = ctx,
+                skipContextRewrite = true,
+            ),
+        )
+    }
 }

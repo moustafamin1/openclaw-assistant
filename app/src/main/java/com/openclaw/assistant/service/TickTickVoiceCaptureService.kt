@@ -38,11 +38,15 @@ import com.openclaw.assistant.R
 import com.openclaw.assistant.SettingsActivity
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.speech.VoskModelLoader
+import com.openclaw.assistant.ticktick.AudioPcmWavHelper
 import com.openclaw.assistant.ticktick.CaptureSaveOutcome
 import com.openclaw.assistant.ticktick.ContextIndexManager
+import com.openclaw.assistant.ticktick.Gemma4AudioTranscriber
+import com.openclaw.assistant.ticktick.Gemma4ModelManager
 import com.openclaw.assistant.ticktick.OnDeviceLanguageSupport
 import com.openclaw.assistant.ticktick.TickTickCaptureRepository
 import com.openclaw.assistant.ticktick.TranscriptNormalizer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -57,6 +61,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.vosk.Recognizer
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -77,17 +82,18 @@ class TickTickVoiceCaptureService : Service() {
     private var pausedHotword = false
 
     private val isRecording = AtomicBoolean(false)
+    private val audioStopRequested = AtomicBoolean(false)
     private val micForegroundReleased = AtomicBoolean(false)
     @Volatile private var captureCancelled = false
     private val audioRecordLock = Any()
     @Volatile private var activeAudioRecord: AudioRecord? = null
+    @Volatile private var lastCapturedGemma4Pcm: ByteArray? = null
     private var androidRecognizer: SpeechRecognizer? = null
     @Volatile private var activeSegmentDeferred: CompletableDeferred<Pair<String, Int?>>? = null
     @Volatile private var latestAndroidPartial: String = ""
     @Volatile private var lastStopHapticAtMs: Long = 0L
     @Volatile private var stopListeningDispatched: CompletableDeferred<Unit>? = null
     private val captureFinishedUnlocked = AtomicBoolean(false)
-    private val captureLogLock = Any()
 
     private fun setCaptureDiagnostic(value: String) {
         lastCaptureDiagnostic = value
@@ -97,16 +103,8 @@ class TickTickVoiceCaptureService : Service() {
 
     private fun appendDebugCaptureLog(line: String) {
         if (!BuildConfig.DEBUG) return
-        val entry = "${java.time.Instant.now()} | $line"
         scope.launch(Dispatchers.IO + NonCancellable) {
-            runCatching {
-                synchronized(captureLogLock) {
-                    val logFile = File(filesDir, DEBUG_CAPTURE_LOG_FILE)
-                    val existing = if (logFile.exists()) logFile.readLines() else emptyList()
-                    val updated = (existing + entry).takeLast(MAX_DEBUG_CAPTURE_LOG_LINES)
-                    logFile.writeText(updated.joinToString("\n", postfix = "\n"))
-                }
-            }
+            appendDebugLog(applicationContext, line)
         }
     }
 
@@ -196,21 +194,65 @@ class TickTickVoiceCaptureService : Service() {
         }
 
         captureCancelled = false
+        audioStopRequested.set(false)
+        lastCapturedGemma4Pcm = null
         micForegroundReleased.set(false)
         captureFinishedUnlocked.set(false)
         lastStopHapticAtMs = 0L
         isRecording.set(true)
         activeRecording.set(true)
 
-        val useAndroidOnDevice = settings.tickTickSpeechEngine == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE &&
-            (SpeechRecognizer.isRecognitionAvailable(this) ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    SpeechRecognizer.isOnDeviceRecognitionAvailable(this)))
+        val enginePref = settings.tickTickSpeechEngine
+        val hasAndroidStt = SpeechRecognizer.isRecognitionAvailable(this) ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this))
+        val useGemma4 = enginePref == SettingsRepository.TICKTICK_ENGINE_GEMMA4_AUDIO
+        val useAndroidOnDevice = enginePref == SettingsRepository.TICKTICK_ENGINE_ANDROID_ON_DEVICE && hasAndroidStt
 
         stopListeningDispatched = CompletableDeferred()
         captureJob = scope.launch {
             try {
+                var skipContextRewrite = false
                 val transcript = when {
+                    useGemma4 -> {
+                        if (Gemma4ModelManager.isModelReady(this@TickTickVoiceCaptureService)) {
+                            val gemmaText = captureWithGemma4Audio()
+                            if (gemmaText != null) {
+                                skipContextRewrite = true
+                                gemmaText
+                            } else if (!captureCancelled) {
+                                val fallbackPcm = lastCapturedGemma4Pcm
+                                lastCapturedGemma4Pcm = null
+                                if (fallbackPcm != null) {
+                                    val voskText = decodePcmWithVosk(fallbackPcm)
+                                    setCaptureDiagnostic("$lastCaptureDiagnostic -> Vosk(pcm-fallback) raw=\"$voskText\"")
+                                    voskText
+                                } else {
+                                    ""
+                                }
+                            } else {
+                                ""
+                            }
+                        } else {
+                            appendDebugCaptureLog("Gemma4 model not downloaded -> fallback")
+                            if (hasAndroidStt) {
+                                val googleText = captureWithAndroidOnDeviceStt()
+                                if (googleText != null) {
+                                    googleText
+                                } else if (isRecording.get() && !captureCancelled) {
+                                    val voskText = captureWithVosk()
+                                    setCaptureDiagnostic("$lastCaptureDiagnostic -> Vosk(fallback) raw=\"$voskText\"")
+                                    voskText
+                                } else {
+                                    ""
+                                }
+                            } else {
+                                val voskText = captureWithVosk()
+                                setCaptureDiagnostic("Gemma4(missing) -> Vosk(fallback) raw=\"$voskText\"")
+                                voskText
+                            }
+                        }
+                    }
                     useAndroidOnDevice -> {
                         val googleText = captureWithAndroidOnDeviceStt()
                         if (googleText != null) {
@@ -229,7 +271,11 @@ class TickTickVoiceCaptureService : Service() {
                         voskText
                     }
                 }
-                handleTranscriptResult(transcript, cancelled = captureCancelled)
+                handleTranscriptResult(
+                    transcript = transcript,
+                    cancelled = captureCancelled,
+                    skipContextRewrite = skipContextRewrite,
+                )
             } finally {
                 withContext(NonCancellable + Dispatchers.Main) {
                     releaseMicAndForegroundUi()
@@ -256,6 +302,7 @@ class TickTickVoiceCaptureService : Service() {
         activeRecording.set(false)
 
         if (cancel) {
+            audioStopRequested.set(true)
             startCueJob?.cancel()
             stopActiveAudioRecord()
             stopListeningDispatched?.complete(Unit)
@@ -275,6 +322,7 @@ class TickTickVoiceCaptureService : Service() {
         scope.launch(Dispatchers.Main) {
             delay(380L)
             if (!captureCancelled) {
+                audioStopRequested.set(true)
                 stopActiveAudioRecord()
                 runCatching { androidRecognizer?.stopListening() }
                 Log.i(TAG, "stopListening dispatched")
@@ -297,6 +345,123 @@ class TickTickVoiceCaptureService : Service() {
             scope.launch(Dispatchers.Main) {
                 playBeep(ToneGenerator.TONE_PROP_BEEP)
             }
+        }
+    }
+
+    private suspend fun captureWithGemma4Audio(): String? = withContext(Dispatchers.IO) {
+        val maxBytes = AudioPcmWavHelper.MAX_TOTAL_SECONDS * AudioPcmWavHelper.BYTES_PER_SECOND
+        val readBuffer = ByteArray(READ_CHUNK_BYTES)
+        val pcmOut = ByteArrayOutputStream(SAMPLE_RATE * 2 * 6)
+        val vocab = settings.effectiveTickTickVocabulary()
+        val ctxIndex = ContextIndexManager.getIndex(applicationContext)
+        val bufferSize = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        ).coerceAtLeast(READ_CHUNK_BYTES * 2)
+
+        val audioRecord = openAudioRecordWithRetry(bufferSize)
+        if (audioRecord == null) {
+            Log.e(TAG, "Unable to open AudioRecord for Gemma 4 capture")
+            setCaptureDiagnostic("Gemma4(mic-open-failed)")
+            withContext(NonCancellable + Dispatchers.Main) {
+                notifyCaptureUiUnlocked()
+            }
+            return@withContext null
+        }
+
+        try {
+            synchronized(audioRecordLock) {
+                activeAudioRecord = audioRecord
+            }
+            audioRecord.startRecording()
+            notifyMicStarted(playTone = true)
+
+            // Overlap CPU engine reload + system-prompt prefill while the user speaks.
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    Gemma4AudioTranscriber.prewarm(
+                        context = applicationContext,
+                        customVocabularyRaw = vocab,
+                        contextIndex = ctxIndex,
+                    )
+                }.onFailure { err ->
+                    Log.w(TAG, "Gemma 4 prewarm failed: ${err.message}")
+                }
+            }
+
+            while (!audioStopRequested.get() && !captureCancelled && pcmOut.size() < maxBytes) {
+                val read = audioRecord.read(readBuffer, 0, readBuffer.size)
+                if (read > 0) {
+                    pcmOut.write(readBuffer, 0, read)
+                } else if (read < 0) {
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemma 4 audio capture error", e)
+        } finally {
+            synchronized(audioRecordLock) {
+                if (activeAudioRecord === audioRecord) {
+                    activeAudioRecord = null
+                }
+            }
+            runCatching { audioRecord.stop() }
+            runCatching { audioRecord.release() }
+        }
+
+        // Immediately unlock hardware volume keys while WakeLock + FGS stay alive for inference & haptic.
+        withContext(NonCancellable + Dispatchers.Main) {
+            notifyCaptureUiUnlocked()
+        }
+
+        if (captureCancelled) return@withContext ""
+        val pcmBytes = pcmOut.toByteArray()
+        val durMs = AudioPcmWavHelper.durationMs(pcmBytes)
+        if (!AudioPcmWavHelper.hasAudibleSpeech(pcmBytes)) {
+            setCaptureDiagnostic("Gemma4(silence dur=${durMs}ms)")
+            return@withContext ""
+        }
+
+        return@withContext try {
+            val result = Gemma4AudioTranscriber.transcribePcm(
+                context = applicationContext,
+                pcmBytes = pcmBytes,
+                customVocabularyRaw = vocab,
+                contextIndex = ctxIndex,
+            )
+            setCaptureDiagnostic(
+                "Gemma4(backend=${result.backendUsed}, load=${result.loadMs}ms, infer=${result.inferMs}ms, dur=${result.audioDurationMs}ms, chunks=${result.chunkCount}) out=\"${result.text}\"",
+            )
+            result.text
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Log.e(TAG, "Gemma 4 transcription failed: ${t.message}", t)
+            setCaptureDiagnostic("Gemma4 FAILED(${t.message ?: t.javaClass.simpleName})")
+            lastCapturedGemma4Pcm = pcmBytes
+            null
+        }
+    }
+
+    private suspend fun decodePcmWithVosk(pcmBytes: ByteArray): String = withContext(Dispatchers.IO) {
+        val model = VoskModelLoader.getOrLoadModel(this@TickTickVoiceCaptureService) ?: return@withContext ""
+        var recognizer: Recognizer? = null
+        try {
+            recognizer = Recognizer(model, SAMPLE_RATE.toFloat())
+            var offset = 0
+            while (offset < pcmBytes.size) {
+                val len = (pcmBytes.size - offset).coerceAtMost(4096)
+                val slice = pcmBytes.copyOfRange(offset, offset + len)
+                recognizer.acceptWaveForm(slice, len)
+                offset += len
+            }
+            JSONObject(recognizer.finalResult).optString("text", "")
+        } catch (e: Exception) {
+            Log.e(TAG, "Vosk PCM fallback failed", e)
+            ""
+        } finally {
+            runCatching { recognizer?.close() }
         }
     }
 
@@ -782,10 +947,14 @@ class TickTickVoiceCaptureService : Service() {
         delay(320L)
     }
 
-    private suspend fun handleTranscriptResult(transcript: String, cancelled: Boolean) {
+    private suspend fun handleTranscriptResult(
+        transcript: String,
+        cancelled: Boolean,
+        skipContextRewrite: Boolean = false,
+    ) {
         if (cancelled) return
 
-        when (val outcome = repository.enqueueAndSync(transcript)) {
+        when (val outcome = repository.enqueueAndSync(transcript, skipContextRewrite = skipContextRewrite)) {
             is CaptureSaveOutcome.Synced -> {
                 setCaptureDiagnostic("$lastCaptureDiagnostic -> saved=\"${outcome.title}\"")
                 if (outcome.taskId.isNotBlank()) {
@@ -1071,6 +1240,20 @@ class TickTickVoiceCaptureService : Service() {
         private const val WAKE_LOCK_TAG = "WakeHermesClaw::TickTickVoiceCapture"
         private const val DEBUG_CAPTURE_LOG_FILE = "ticktick_capture_debug.log"
         private const val MAX_DEBUG_CAPTURE_LOG_LINES = 100
+        private val fileLogLock = Any()
+
+        fun appendDebugLog(context: Context, line: String) {
+            if (!BuildConfig.DEBUG) return
+            val entry = "${java.time.Instant.now()} | $line"
+            runCatching {
+                synchronized(fileLogLock) {
+                    val logFile = File(context.applicationContext.filesDir, DEBUG_CAPTURE_LOG_FILE)
+                    val existing = if (logFile.exists()) logFile.readLines() else emptyList()
+                    val updated = (existing + entry).takeLast(MAX_DEBUG_CAPTURE_LOG_LINES)
+                    logFile.writeText(updated.joinToString("\n", postfix = "\n"))
+                }
+            }
+        }
         private val START_HAPTIC_TIMINGS = longArrayOf(0L, 75L)
         private val START_HAPTIC_AMPLITUDES = intArrayOf(0, 255)
         private val STOP_HAPTIC_TIMINGS = longArrayOf(0L, 30L, 45L, 45L)

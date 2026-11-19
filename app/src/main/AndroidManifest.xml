@@ -104,6 +104,12 @@
         android:theme="@style/Theme.OpenClawAssistant"
         tools:targetApi="34">
 
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
+        <uses-native-library android:name="libOpenCL-car.so" android:required="false" />
+        <uses-native-library android:name="libGLES_mali.so" android:required="false" />
+        <uses-native-library android:name="libvndksupport.so" android:required="false" />
+
         <!-- Main Activity -->
         <activity
             android:name="com.openclaw.assistant.MainActivity"

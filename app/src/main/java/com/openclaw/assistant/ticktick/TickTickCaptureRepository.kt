@@ -41,9 +41,17 @@ class TickTickCaptureRepository(
 
     fun observePendingCount(): Flow<Int> = dao.observeCount()
 
-    suspend fun enqueueAndSync(rawTranscript: String): CaptureSaveOutcome = withContext(Dispatchers.IO) {
-        val contextIndex = ContextIndexManager.getIndex(appContext)
-        val cleanTitle = cleanTranscript(rawTranscript, settings.effectiveTickTickVocabulary(), contextIndex)
+    suspend fun enqueueAndSync(
+        rawTranscript: String,
+        skipContextRewrite: Boolean = false,
+    ): CaptureSaveOutcome = withContext(Dispatchers.IO) {
+        val contextIndex = if (skipContextRewrite) null else ContextIndexManager.getIndex(appContext)
+        val cleanTitle = cleanTranscript(
+            raw = rawTranscript,
+            customVocabulary = settings.effectiveTickTickVocabulary(),
+            contextIndex = contextIndex,
+            skipContextRewrite = skipContextRewrite,
+        )
         if (cleanTitle.isEmpty()) return@withContext CaptureSaveOutcome.IgnoredBlank
 
         val rowId = dao.insert(
@@ -154,8 +162,14 @@ class TickTickCaptureRepository(
             raw: String,
             customVocabulary: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
             contextIndex: ContextIndex? = null,
+            skipContextRewrite: Boolean = false,
         ): String {
-            return TranscriptNormalizer.normalize(raw, customVocabulary, contextIndex)
+            return TranscriptNormalizer.normalize(
+                rawTranscript = raw,
+                customVocabularyRaw = customVocabulary,
+                contextIndex = contextIndex,
+                skipContextRewrite = skipContextRewrite,
+            )
         }
     }
 }

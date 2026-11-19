@@ -96,6 +96,14 @@ class OpenClawApplication : Application() {
         }
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        @Suppress("DEPRECATION")
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            com.openclaw.assistant.ticktick.Gemma4AudioTranscriber.unloadNow()
+        }
+    }
+
     private fun applySavedAppLocale() {
         val tag = SettingsRepository.getInstance(this).appLanguage.trim()
         val locales = if (tag.isBlank()) {

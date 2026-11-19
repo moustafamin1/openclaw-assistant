@@ -552,6 +552,7 @@ class SettingsRepository(context: Context) {
         const val TICKTICK_ENGINE_WHISPER_ONNX = "whisper_onnx"
         const val TICKTICK_ENGINE_VOSK = "vosk"
         const val TICKTICK_ENGINE_ANDROID_ON_DEVICE = "android_on_device"
+        const val TICKTICK_ENGINE_GEMMA4_AUDIO = "gemma4_audio"
         
         // TTS settings keys
         private const val KEY_TTS_TYPE = "tts_type"

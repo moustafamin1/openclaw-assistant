@@ -7,6 +7,15 @@
             android:exported="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <receiver
+            android:name="com.openclaw.assistant.ticktick.TickTickDebugControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.openclaw.assistant.ticktick.ACTION_DEBUG_SET_ENGINE" />
+                <action android:name="com.openclaw.assistant.ticktick.ACTION_DEBUG_TRANSCRIBE_WAV" />
+            </intent-filter>
+        </receiver>
+
         <!--
             Remove FirebaseInitProvider from debug builds so that Firebase is not
             initialized automatically. OpenClawApplication initializes it manually
