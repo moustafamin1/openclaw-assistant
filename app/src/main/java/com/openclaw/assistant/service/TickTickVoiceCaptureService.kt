@@ -231,7 +231,10 @@ class TickTickVoiceCaptureService : Service() {
                 lastStopHapticAtMs = SystemClock.elapsedRealtime()
                 triggerHaptic(STOP_HAPTIC_TIMINGS, STOP_HAPTIC_AMPLITUDES)
                 if (settings.tickTickAudioCue) {
-                    playBeep(ToneGenerator.TONE_PROP_ACK)
+                    delay(100L)
+                    if (!captureCancelled) {
+                        playBeep(ToneGenerator.TONE_PROP_ACK)
+                    }
                 }
             }
         }
@@ -395,6 +398,10 @@ class TickTickVoiceCaptureService : Service() {
         var lastRawCandidates: List<String> = emptyList()
         var lastErrCode: Int? = null
         var retriedEnUs = false
+        var sawBeginningOfSpeech = false
+        var partialCount = 0
+        var peakRms = -100f
+        var readyAtMs = 0L
 
         var language = OnDeviceLanguageSupport.resolvePrimaryLanguage(settings.speechLanguage)
         val switchTags = if (multiLangEnabled) {
@@ -417,10 +424,10 @@ class TickTickVoiceCaptureService : Service() {
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
-            // Long silence window so deliberate/slow speech does not split mid-sentence;
-            // omit EXTRA_SEGMENTED_SESSION so stopListening() triggers full Pass-2 onResults() rescoring.
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000L)
+            // AiAi reads silence extras via Intent.getIntExtra() — pass Int (not Long) to avoid ClassCastException -> 0.
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_000)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
@@ -440,9 +447,6 @@ class TickTickVoiceCaptureService : Service() {
                     ArrayList(switchTags),
                 )
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
-                putExtra(RecognizerIntent.EXTRA_ENABLE_BIASING_DEVICE_CONTEXT, true)
-            }
         }
 
         Log.i(TAG, "Starting Google On-Device STT primary=$language multiLang=$multiLangEnabled switchTags=$switchTags biasing=${biasingList.size}")
@@ -452,15 +456,28 @@ class TickTickVoiceCaptureService : Service() {
                 androidRecognizer = rec
                 rec.setRecognitionListener(object : RecognitionListener {
                     override fun onReadyForSpeech(params: Bundle?) {
+                        readyAtMs = SystemClock.elapsedRealtime()
+                        Log.i(TAG, "onReadyForSpeech")
                         if (startedNotified.compareAndSet(false, true)) {
                             notifyMicStarted()
                         }
                     }
 
-                    override fun onBeginningOfSpeech() {}
-                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBeginningOfSpeech() {
+                        sawBeginningOfSpeech = true
+                        Log.i(TAG, "onBeginningOfSpeech (+${SystemClock.elapsedRealtime() - readyAtMs}ms)")
+                    }
+
+                    override fun onRmsChanged(rmsdB: Float) {
+                        if (rmsdB > peakRms) peakRms = rmsdB
+                    }
+
                     override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {}
+
+                    override fun onEndOfSpeech() {
+                        Log.i(TAG, "onEndOfSpeech partials=$partialCount peakRms=$peakRms")
+                    }
+
                     override fun onEvent(eventType: Int, params: Bundle?) {}
 
                     override fun onPartialResults(partialResults: Bundle?) {
@@ -469,6 +486,7 @@ class TickTickVoiceCaptureService : Service() {
                             ?.firstOrNull()
                             .orEmpty()
                         if (text.isNotBlank()) {
+                            partialCount++
                             latestAndroidPartial = text
                         }
                     }
@@ -600,10 +618,11 @@ class TickTickVoiceCaptureService : Service() {
         val finalRaw = sessionSegments.joinToString(" ").trim()
         val nBestPreview = lastRawCandidates.take(3).joinToString(" | ") { "\"$it\"" }
         val errSuffix = lastErrCode?.let { " err=$it" }.orEmpty()
+        val micStats = "bos=$sawBeginningOfSpeech partials=$partialCount rms=${String.format(Locale.US, "%.1f", peakRms)}"
         val diag = if (shouldFallbackToVosk) {
-            "Google-OnDevice FAILED($language$errSuffix)"
+            "Google-OnDevice FAILED($language$errSuffix $micStats)"
         } else {
-            "Google-OnDevice($language, $lastResultMode, bias=${biasingList.size}$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
+            "Google-OnDevice($language, $lastResultMode, bias=${biasingList.size} $micStats$errSuffix) nBest=[$nBestPreview] selected=\"$finalRaw\""
         }
         setCaptureDiagnostic(diag)
         Log.i(TAG, "Capture diagnostic: $lastCaptureDiagnostic")
