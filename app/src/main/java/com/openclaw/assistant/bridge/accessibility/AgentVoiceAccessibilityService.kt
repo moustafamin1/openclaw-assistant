@@ -19,10 +19,14 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.openclaw.assistant.bridge.WakeLockManager
 import com.openclaw.assistant.data.SettingsRepository
 import com.openclaw.assistant.service.TickTickVoiceCaptureService
+import com.openclaw.assistant.ticktick.OnDeviceLanguageSupport
 import com.openclaw.assistant.ticktick.ScreenOffVolumeKeyBridge
 import com.openclaw.assistant.ticktick.VolumeCaptureKeyHandler
 import com.openclaw.assistant.ticktick.VolumeTriggerMode
 import com.openclaw.assistant.ui.ticktick.TickTickLockCaptureActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.security.MessageDigest
 
 /**
@@ -97,6 +101,9 @@ class AgentVoiceAccessibilityService : AccessibilityService() {
             }
         }
         ScreenOffVolumeKeyBridge.syncRegistration(applicationContext, force = true)
+        CoroutineScope(Dispatchers.IO).launch {
+            runCatching { OnDeviceLanguageSupport.warmSystemSpeechService(applicationContext) }
+        }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {

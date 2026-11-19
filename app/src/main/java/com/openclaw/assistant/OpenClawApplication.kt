@@ -87,6 +87,9 @@ class OpenClawApplication : Application() {
                 runCatching {
                     com.openclaw.assistant.ticktick.ContextIndexManager.getIndex(this@OpenClawApplication)
                 }
+                runCatching {
+                    com.openclaw.assistant.ticktick.OnDeviceLanguageSupport.warmSystemSpeechService(this@OpenClawApplication)
+                }
             }
         } catch (e: Throwable) {
             Log.w("OpenClawApp", "Glossary/volume bridge init skipped: ${e.message}")

@@ -82,6 +82,7 @@ class TickTickVoiceCaptureService : Service() {
     @Volatile private var activeSegmentDeferred: CompletableDeferred<Pair<String, Int?>>? = null
     @Volatile private var latestAndroidPartial: String = ""
     @Volatile private var lastStopHapticAtMs: Long = 0L
+    @Volatile private var stopListeningDispatched: CompletableDeferred<Unit>? = null
     private val captureFinishedUnlocked = AtomicBoolean(false)
 
     private fun setCaptureDiagnostic(value: String) {
@@ -113,6 +114,7 @@ class TickTickVoiceCaptureService : Service() {
     override fun onDestroy() {
         isRecording.set(false)
         activeRecording.set(false)
+        stopListeningDispatched = null
         stopActiveAudioRecord()
         cleanupAndroidRecognizer()
         resumeHotwordIfNeeded()
@@ -164,6 +166,7 @@ class TickTickVoiceCaptureService : Service() {
                 (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                     SpeechRecognizer.isOnDeviceRecognitionAvailable(this)))
 
+        stopListeningDispatched = CompletableDeferred()
         captureJob = scope.launch {
             try {
                 val transcript = when {
@@ -213,6 +216,7 @@ class TickTickVoiceCaptureService : Service() {
 
         if (cancel) {
             stopActiveAudioRecord()
+            stopListeningDispatched?.complete(Unit)
             captureJob?.cancel()
             cleanupAndroidRecognizer()
             triggerHaptic(CANCEL_HAPTIC_TIMINGS, CANCEL_HAPTIC_AMPLITUDES)
@@ -229,6 +233,8 @@ class TickTickVoiceCaptureService : Service() {
             if (!captureCancelled) {
                 stopActiveAudioRecord()
                 runCatching { androidRecognizer?.stopListening() }
+                Log.i(TAG, "stopListening dispatched")
+                stopListeningDispatched?.complete(Unit)
                 lastStopHapticAtMs = SystemClock.elapsedRealtime()
                 triggerHaptic(STOP_HAPTIC_TIMINGS, STOP_HAPTIC_AMPLITUDES)
                 if (settings.tickTickAudioCue) {
@@ -407,6 +413,7 @@ class TickTickVoiceCaptureService : Service() {
         var partialCount = 0
         var peakRms = -100f
         var readyAtMs = 0L
+        var completedCleanly = false
 
         var language = OnDeviceLanguageSupport.resolvePrimaryLanguage(settings.speechLanguage)
         val switchTags = if (multiLangEnabled) {
@@ -421,6 +428,7 @@ class TickTickVoiceCaptureService : Service() {
         }
 
         fun buildRecognizerIntent(targetLang: String): Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, targetLang)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, targetLang)
@@ -430,7 +438,6 @@ class TickTickVoiceCaptureService : Service() {
             putExtra(RecognizerIntent.EXTRA_MASK_OFFENSIVE_WORDS, false)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 15_000)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3_000)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
@@ -502,9 +509,13 @@ class TickTickVoiceCaptureService : Service() {
                     override fun onSegmentResults(segmentResults: Bundle) {
                         val candidates = segmentResults
                             .getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.filter { it.isNotBlank() }
                             .orEmpty()
-                        lastRawCandidates = candidates
-                        lastResultMode = "onSegmentResults"
+                        Log.i(TAG, "onSegmentResults candidates=$candidates keys=${segmentResults.keySet()}")
+                        if (candidates.isNotEmpty()) {
+                            lastRawCandidates = candidates
+                            lastResultMode = "onSegmentResults"
+                        }
                         val segText = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         if (segText.isNotEmpty()) {
                             sessionSegments.add(segText)
@@ -513,6 +524,7 @@ class TickTickVoiceCaptureService : Service() {
                     }
 
                     override fun onEndOfSegmentedSession() {
+                        completedCleanly = true
                         val trailing = latestAndroidPartial.trim()
                         if (trailing.isNotEmpty()) lastResultMode = "partial-end-seg"
                         latestAndroidPartial = ""
@@ -522,10 +534,20 @@ class TickTickVoiceCaptureService : Service() {
                     override fun onResults(results: Bundle?) {
                         val candidates = results
                             ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.filter { it.isNotBlank() }
                             .orEmpty()
-                        Log.i(TAG, "onResults candidates=$candidates")
-                        lastRawCandidates = candidates
-                        lastResultMode = if (candidates.isNotEmpty()) "onResults(Pass2)" else "partial-empty-res"
+                        @Suppress("DEPRECATION")
+                        val bundleDebug = results?.keySet()?.joinToString(", ") { k ->
+                            "$k=${results.get(k)?.toString()?.take(80)}"
+                        } ?: "null"
+                        Log.i(TAG, "onResults candidates=$candidates bundle={$bundleDebug} lastPartial=\"$latestAndroidPartial\"")
+                        completedCleanly = true
+                        if (candidates.isNotEmpty()) {
+                            lastRawCandidates = candidates
+                            lastResultMode = "onResults(Pass2)"
+                        } else if (sessionSegments.isEmpty()) {
+                            lastResultMode = "partial-empty-res"
+                        }
                         val text = TranscriptNormalizer.selectBestHypothesis(candidates, effectiveVocab, contextIndex)
                         val trailing = text.ifEmpty { latestAndroidPartial.trim() }
                         latestAndroidPartial = ""
@@ -533,7 +555,8 @@ class TickTickVoiceCaptureService : Service() {
                     }
 
                     override fun onError(error: Int) {
-                        Log.w(TAG, "Android on-device STT error: $error")
+                        Log.w(TAG, "Android on-device STT error: $error lastPartial=\"$latestAndroidPartial\"")
+                        completedCleanly = true
                         lastErrCode = error
                         val trailing = latestAndroidPartial.trim()
                         if (trailing.isNotEmpty() && lastResultMode == "none") {
@@ -561,7 +584,18 @@ class TickTickVoiceCaptureService : Service() {
                     delay(50L)
                 }
 
-                val awaited = withTimeoutOrNull(3000L) { segDone.await() }
+                if (!isRecording.get() && !captureCancelled && !segDone.isCompleted) {
+                    withTimeoutOrNull(700L) { stopListeningDispatched?.await() }
+                    if (stopListeningDispatched?.isCompleted != true) {
+                        withContext(Dispatchers.Main) {
+                            runCatching { recognizer.stopListening() }
+                        }
+                        Log.i(TAG, "stopListening dispatched (fallback)")
+                        stopListeningDispatched?.complete(Unit)
+                    }
+                }
+
+                val awaited = withTimeoutOrNull(6_500L) { segDone.await() }
                 val (tailText, segErr) = if (awaited != null) {
                     awaited
                 } else {
@@ -617,7 +651,7 @@ class TickTickVoiceCaptureService : Service() {
         } finally {
             activeSegmentDeferred = null
             withContext(NonCancellable + Dispatchers.Main) {
-                cleanupAndroidRecognizer()
+                cleanupAndroidRecognizer(alreadyCompleted = completedCleanly)
                 if (!shouldFallbackToVosk) {
                     notifyCaptureUiUnlocked()
                 }
@@ -727,15 +761,15 @@ class TickTickVoiceCaptureService : Service() {
         sendBroadcast(Intent(HotwordService.ACTION_RESUME_HOTWORD).setPackage(packageName))
     }
 
-    private fun cleanupAndroidRecognizer() {
+    private fun cleanupAndroidRecognizer(alreadyCompleted: Boolean = false) {
         val rec = androidRecognizer ?: return
         androidRecognizer = null
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            runCatching { rec.cancel() }
+            if (!alreadyCompleted) runCatching { rec.cancel() }
             runCatching { rec.destroy() }
         } else {
             scope.launch(Dispatchers.Main) {
-                runCatching { rec.cancel() }
+                if (!alreadyCompleted) runCatching { rec.cancel() }
                 runCatching { rec.destroy() }
             }
         }

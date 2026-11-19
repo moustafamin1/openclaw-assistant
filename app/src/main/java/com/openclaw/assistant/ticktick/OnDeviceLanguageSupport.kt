@@ -3,6 +3,7 @@ package com.openclaw.assistant.ticktick
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.SystemClock
 import android.speech.ModelDownloadListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
@@ -16,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 data class OnDeviceLanguageStatus(
     val installedDesired: List<String>,
@@ -43,6 +45,8 @@ data class OnDeviceLanguageStatus(
  */
 object OnDeviceLanguageSupport {
     private const val TAG = "OnDeviceLangSupport"
+    private const val SYSTEM_WARMUP_COOLDOWN_MS = 10 * 60 * 1000L
+    private val lastSystemWarmupAtMs = AtomicLong(0L)
 
     private val TARGET_FAMILIES = listOf(
         "en" to listOf("en-US", "en-GB", "en"),
@@ -105,6 +109,16 @@ object OnDeviceLanguageSupport {
         }
     }
 
+    suspend fun warmSystemSpeechService(context: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) return
+        val now = SystemClock.elapsedRealtime()
+        val prev = lastSystemWarmupAtMs.get()
+        if (prev != 0L && now - prev < SYSTEM_WARMUP_COOLDOWN_MS) return
+        lastSystemWarmupAtMs.set(now)
+        runCatching { queryAndPrepare(context.applicationContext, triggerDownloads = false) }
+    }
+
     suspend fun queryAndPrepare(
         context: Context,
         triggerDownloads: Boolean = false,
@@ -112,7 +126,9 @@ object OnDeviceLanguageSupport {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return OnDeviceLanguageStatus.EMPTY
         }
-        if (!SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+        if (!SpeechRecognizer.isRecognitionAvailable(context) &&
+            !SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+        ) {
             return OnDeviceLanguageStatus.EMPTY
         }
         return queryApi33Plus(context.applicationContext, triggerDownloads).also { status ->
@@ -128,8 +144,13 @@ object OnDeviceLanguageSupport {
         triggerDownloads: Boolean,
     ): OnDeviceLanguageStatus {
         val supportDeferred = CompletableDeferred<RecognitionSupport?>()
+        val useSystemSpeech = SpeechRecognizer.isRecognitionAvailable(appContext)
         val recognizer = withContext(Dispatchers.Main) {
-            SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            if (useSystemSpeech) {
+                SpeechRecognizer.createSpeechRecognizer(appContext)
+            } else {
+                SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext)
+            }
         }
 
         try {
@@ -162,7 +183,7 @@ object OnDeviceLanguageSupport {
 
             Log.i(
                 TAG,
-                "AiAi on-device languages: installed=$installed pending=$pending supported=$supported online=${support.onlineLanguages.size}",
+                "Speech on-device languages (system=$useSystemSpeech): installed=$installed pending=$pending supported=$supported online=${support.onlineLanguages.size}",
             )
 
             val installedDesired = mutableListOf<String>()
