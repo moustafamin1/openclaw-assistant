@@ -22,6 +22,12 @@ object AudioPcmWavHelper {
     private const val MIN_RMS_AMPLITUDE = 45.0
     private const val SPLIT_SEARCH_START_SEC = 24
     private const val SPLIT_WINDOW_MS = 100
+    private const val TRIM_FRAME_MS = 20
+    private const val TRIM_LEAD_PAD_FRAMES = 10 // 200 ms
+    private const val TRIM_TAIL_PAD_FRAMES = 12 // 240 ms
+    private const val TARGET_PEAK_AMPLITUDE = 26_000.0
+    private const val TARGET_RMS_AMPLITUDE = 4_600.0
+    private const val MAX_NORMALIZATION_GAIN = 8.0
 
     /**
      * Wraps 16kHz 16-bit mono little-endian raw PCM bytes in a standard 44-byte RIFF/WAVE header.
@@ -168,6 +174,105 @@ object AudioPcmWavHelper {
             start = bestCut
         }
         return chunks
+    }
+
+    /**
+     * Cleans raw microphone PCM for Gemma 4's USM audio encoder:
+     * 1. Removes DC offset.
+     * 2. Trims leading/trailing dead silence while preserving consonant padding.
+     * 3. Softly normalizes quiet VOICE_RECOGNITION audio (which disables Android hardware AGC)
+     *    without clipping or over-amplifying low-level noise.
+     */
+    fun preprocessForAsr(pcmBytes: ByteArray): ByteArray {
+        val alignedLen = pcmBytes.size - (pcmBytes.size % BYTES_PER_SAMPLE)
+        if (alignedLen < MIN_SPEECH_BYTES) return pcmBytes.copyOf(alignedLen)
+
+        val sampleCount = alignedLen / BYTES_PER_SAMPLE
+        val samples = DoubleArray(sampleCount)
+        var sum = 0.0
+        var i = 0
+        var idx = 0
+        while (i < alignedLen) {
+            val lo = pcmBytes[i].toInt() and 0xFF
+            val hi = pcmBytes[i + 1].toInt()
+            val s = ((hi shl 8) or lo).toDouble()
+            samples[idx] = s
+            sum += s
+            i += 2
+            idx++
+        }
+
+        // 1. Remove DC bias
+        val dcOffset = sum / sampleCount
+        for (k in 0 until sampleCount) {
+            samples[k] -= dcOffset
+        }
+
+        // 2. Adaptive leading/trailing silence trim in 20ms frames
+        val frameSamples = (SAMPLE_RATE * TRIM_FRAME_MS) / 1000 // 320 samples
+        val frameCount = (sampleCount + frameSamples - 1) / frameSamples
+        val frameRms = DoubleArray(frameCount)
+        var maxFrameRms = 0.0
+        for (f in 0 until frameCount) {
+            val start = f * frameSamples
+            val end = (start + frameSamples).coerceAtMost(sampleCount)
+            var sq = 0.0
+            for (k in start until end) {
+                sq += samples[k] * samples[k]
+            }
+            val rms = kotlin.math.sqrt(sq / (end - start).coerceAtLeast(1))
+            frameRms[f] = rms
+            if (rms > maxFrameRms) maxFrameRms = rms
+        }
+
+        if (maxFrameRms < MIN_RMS_AMPLITUDE) {
+            return pcmBytes.copyOf(alignedLen)
+        }
+
+        val activeThreshold = maxOf(MIN_RMS_AMPLITUDE, maxFrameRms * 0.06)
+        var firstActive = 0
+        while (firstActive < frameCount && frameRms[firstActive] < activeThreshold) {
+            firstActive++
+        }
+        var lastActive = frameCount - 1
+        while (lastActive > firstActive && frameRms[lastActive] < activeThreshold) {
+            lastActive--
+        }
+
+        val trimStartSample = ((firstActive - TRIM_LEAD_PAD_FRAMES).coerceAtLeast(0)) * frameSamples
+        val trimEndSample = (((lastActive + 1 + TRIM_TAIL_PAD_FRAMES).coerceAtMost(frameCount)) * frameSamples)
+            .coerceAtMost(sampleCount)
+        val outSamples = (trimEndSample - trimStartSample).coerceAtLeast(1)
+
+        // 3. Soft peak + RMS normalization
+        var peak = 0.0
+        var sumSq = 0.0
+        for (k in trimStartSample until trimEndSample) {
+            val v = samples[k]
+            val a = abs(v)
+            if (a > peak) peak = a
+            sumSq += v * v
+        }
+        val rms = kotlin.math.sqrt(sumSq / outSamples)
+        val gain = when {
+            peak <= 1.0 -> 1.0
+            peak > 29_000.0 -> 28_000.0 / peak
+            else -> minOf(
+                TARGET_PEAK_AMPLITUDE / peak,
+                TARGET_RMS_AMPLITUDE / rms.coerceAtLeast(1.0),
+            ).coerceIn(1.0, MAX_NORMALIZATION_GAIN)
+        }
+
+        val out = ByteArray(outSamples * BYTES_PER_SAMPLE)
+        var outPos = 0
+        for (k in trimStartSample until trimEndSample) {
+            val scaled = (samples[k] * gain).toInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            out[outPos] = (scaled and 0xFF).toByte()
+            out[outPos + 1] = ((scaled shr 8) and 0xFF).toByte()
+            outPos += 2
+        }
+        return out
     }
 
     fun durationMs(pcmBytes: ByteArray): Long {

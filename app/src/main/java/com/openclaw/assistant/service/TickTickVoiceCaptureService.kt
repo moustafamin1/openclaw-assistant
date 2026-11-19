@@ -370,25 +370,37 @@ class TickTickVoiceCaptureService : Service() {
             return@withContext null
         }
 
+        // Start pre-warming CPU(6) + proofreader immediately while cue plays and user speaks.
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                Gemma4AudioTranscriber.prewarm(
+                    context = applicationContext,
+                    customVocabularyRaw = vocab,
+                    contextIndex = ctxIndex,
+                )
+            }.onFailure { err ->
+                Log.w(TAG, "Gemma 4 prewarm failed: ${err.message}")
+            }
+        }
+
         try {
             synchronized(audioRecordLock) {
                 activeAudioRecord = audioRecord
             }
-            audioRecord.startRecording()
+            // Play start cue BEFORE recording PCM so speaker beep & motor buzz never corrupt syllable #1.
             notifyMicStarted(playTone = true)
-
-            // Overlap CPU engine reload + system-prompt prefill while the user speaks.
-            scope.launch(Dispatchers.IO) {
-                runCatching {
-                    Gemma4AudioTranscriber.prewarm(
-                        context = applicationContext,
-                        customVocabularyRaw = vocab,
-                        contextIndex = ctxIndex,
-                    )
-                }.onFailure { err ->
-                    Log.w(TAG, "Gemma 4 prewarm failed: ${err.message}")
-                }
+            val cueSettleMs = when {
+                settings.tickTickAudioCue -> 160L
+                settings.tickTickHapticFeedback -> 50L
+                else -> 0L
             }
+            if (cueSettleMs > 0L) {
+                delay(cueSettleMs)
+            }
+            if (captureCancelled || audioStopRequested.get()) {
+                return@withContext ""
+            }
+            audioRecord.startRecording()
 
             while (!audioStopRequested.get() && !captureCancelled && pcmOut.size() < maxBytes) {
                 val read = audioRecord.read(readBuffer, 0, readBuffer.size)

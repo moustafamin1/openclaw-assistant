@@ -3,79 +3,22 @@ package com.openclaw.assistant.ticktick
 import java.util.Locale
 
 /**
- * Builds compact personal-vocabulary hints and Wispr-Flow-style dictation prompts
- * for on-device Gemma 4 E2B native audio transcription, plus output cleanup.
+ * Builds the English-only dictation prompt for on-device Gemma 4 E2B native audio
+ * transcription (zero German/Arabic dilution, zero bloated vocabulary dump) plus output cleanup.
  */
 object Gemma4PromptBuilder {
 
     const val SILENCE_TOKEN = "[SILENCE]"
 
-    fun buildCompactVocabulary(
-        customVocabularyRaw: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
-        contextIndex: ContextIndex? = null,
-        maxTerms: Int = 60,
-    ): List<String> {
-        val explicitLexicon = TranscriptNormalizer.parseVocabulary(customVocabularyRaw)
-        val mergedRanked = TranscriptNormalizer.biasingTerms(
-            customVocabularyRaw = customVocabularyRaw,
-            maxTerms = maxTerms * 3,
-            contextIndex = contextIndex,
-        )
-
-        val scored = linkedMapOf<String, Pair<String, Double>>()
-
-        fun addCandidate(rawTerm: String, baseScore: Double) {
-            val clean = rawTerm.trim()
-            if (clean.length !in 2..48) return
-            val key = clean.lowercase(Locale.ROOT)
-            var score = baseScore
-            if (contextIndex != null) {
-                val w = contextIndex.unigramWeight(key)
-                if (w > 0.0) score += kotlin.math.ln(1.0 + w) * 3.0
-            }
-            if (Regex("^[A-Z]{2,}s?[0-9]*$").matches(clean)) score += 4.0
-            if (clean.any { it in "äöüßÄÖÜ" }) score += 3.0
-            if (clean.any { it.isUpperCase() }) score += 1.0
-            val prev = scored[key]
-            if (prev == null || score > prev.second) {
-                scored[key] = (prev?.first ?: clean) to score
-            }
-        }
-
-        // Prioritize explicit user/synced terms by frequency in Second Brain rather than alphabetical order
-        val aliasedCanonicals = explicitLexicon.explicitAliases.values
-            .mapTo(hashSetOf()) { it.lowercase(Locale.ROOT) }
-        for (term in explicitLexicon.terms) {
-            val bonus = if (term.lowercase(Locale.ROOT) in aliasedCanonicals) 6.0 else 0.0
-            addCandidate(term, baseScore = 25.0 + bonus)
-        }
-
-        mergedRanked.forEachIndexed { idx, term ->
-            val rankBonus = ((mergedRanked.size - idx).toDouble() / mergedRanked.size.coerceAtLeast(1)) * 10.0
-            addCandidate(term, baseScore = 10.0 + rankBonus)
-        }
-
-        return scored.values
-            .sortedByDescending { it.second }
-            .map { it.first }
-            .take(maxTerms)
-    }
-
-    fun buildSystemInstruction(vocabularyTerms: List<String>): String {
-        val vocabLine = if (vocabularyTerms.isNotEmpty()) {
-            "Personal Vocabulary: ${vocabularyTerms.joinToString(", ")}"
-        } else {
-            "Personal Vocabulary: (none)"
-        }
-        return """
-Verbatim voice-to-task transcriber (English, German, Arabic, or mixed).
-Output ONLY final clean text: no quotes, markdown, prefixes, or fillers. Resolve verbal self-corrections.
-Convert leading spoken "Brain..." or "at brain..." to "@brain: ...", and "hashtag X" to "#X".
-Use Personal Vocabulary spellings ONLY when phonetically spoken; never alter unrelated everyday words.
-Output $SILENCE_TOKEN if no speech.
-$vocabLine
-        """.trimIndent()
-    }
+    fun buildEnglishSystemInstruction(): String = """
+You are an English voice-to-task dictation transcriber.
+Transcribe ONLY in English.
+Output ONLY the clean, properly capitalized final English text — no quotes, markdown, prefixes, or explanations.
+Remove hesitation fillers (um, uh) and resolve immediate verbal self-corrections.
+Use natural English spelling, compound words, and technical terms accurately based on sentence context.
+Write numbers as digits (e.g., 3 instead of three).
+If there is no speech, output exactly $SILENCE_TOKEN.
+    """.trimIndent()
 
     fun sanitizeModelOutput(rawOutput: String): String {
         if (rawOutput.isBlank()) return ""
@@ -88,7 +31,7 @@ $vocabLine
 
         // Strip common leading labels if any leaked
         text = text.replace(
-            Regex("""^(?:transcription|transcript|task|output|audio|text)\s*:\s*""", RegexOption.IGNORE_CASE),
+            Regex("""^(?:transcription|transcript|task|output|audio|text|corrected)\s*:\s*""", RegexOption.IGNORE_CASE),
             "",
         ).trim()
 

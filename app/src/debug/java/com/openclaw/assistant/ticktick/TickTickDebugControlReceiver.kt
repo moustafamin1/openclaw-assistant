@@ -65,7 +65,7 @@ class TickTickDebugControlReceiver : BroadcastReceiver() {
                             return@launch
                         }
 
-                        // Release BroadcastQueue slot immediately so cold GPU cache compilation (>60s) never ANRs.
+                        // Release BroadcastQueue slot immediately so cold init never ANRs.
                         finishBroadcastOnce()
 
                         TickTickVoiceCaptureService.appendDebugLog(appContext, "DEBUG wav_start file=${wavFile.name} reqBackend=${backendOverride ?: "auto"}")
@@ -99,9 +99,6 @@ class TickTickDebugControlReceiver : BroadcastReceiver() {
                             append(" text=\"$normalized\"")
                             if (res.text != normalized) {
                                 append(" gemmaRaw=\"${res.text}\"")
-                            }
-                            if (res.rawOutput != res.text) {
-                                append(" raw=\"${res.rawOutput}\"")
                             }
                             if (res.benchmarkSummary.isNotEmpty()) {
                                 append(" bench=\"${res.benchmarkSummary}\"")

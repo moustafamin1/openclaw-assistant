@@ -8,31 +8,13 @@ import org.junit.Test
 class Gemma4PromptBuilderTest {
 
     @Test
-    fun buildCompactVocabularyDeduplicatesAndCapsTerms() {
-        val ctx = ContextLanguageModel.fromDto(
-            ContextIndexPayloadDto(
-                unigrams = mapOf(
-                    "claude" to ContextUnigramDto(w = 18.0, c = "Claude"),
-                    "chatgpt" to ContextUnigramDto(w = 10.0, c = "ChatGPT"),
-                    "study" to ContextUnigramDto(w = 46.0, c = "study"),
-                ),
-            ),
-        )
-        val custom = "Claude\nNoory\nnoory\nZebeeb = the bib\nChatGPT"
-        val terms = Gemma4PromptBuilder.buildCompactVocabulary(custom, ctx, maxTerms = 20)
-
-        assertTrue(terms.size <= 20)
-        assertEquals(1, terms.count { it.equals("Noory", ignoreCase = true) })
-        assertEquals(1, terms.count { it.equals("Claude", ignoreCase = true) })
-        assertFalse(terms.any { it.equals("study", ignoreCase = true) })
-    }
-
-    @Test
-    fun buildSystemInstructionIncludesRulesAndVocabularyLine() {
-        val prompt = Gemma4PromptBuilder.buildSystemInstruction(listOf("Noory", "Claude", "Finanzamt"))
-        assertTrue(prompt.contains("Personal Vocabulary: Noory, Claude, Finanzamt"))
+    fun buildEnglishSystemInstructionIsStrictlyEnglishAndFreeOfWordDump() {
+        val prompt = Gemma4PromptBuilder.buildEnglishSystemInstruction()
+        assertTrue(prompt.contains("ONLY in English"))
         assertTrue(prompt.contains("[SILENCE]"))
-        assertTrue(prompt.contains("English, German, Arabic"))
+        assertFalse(prompt.contains("German"))
+        assertFalse(prompt.contains("Arabic"))
+        assertFalse(prompt.contains("Personal Vocabulary"))
     }
 
     @Test

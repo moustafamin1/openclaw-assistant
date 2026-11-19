@@ -44,9 +44,9 @@ data class Gemma4TranscriptionResult(
 )
 
 /**
- * On-demand LiteRT-LM Gemma 4 E2B multimodal audio transcriber.
- * Defaults to tuned CPU inference (faster cold load + warm decode than PowerVR OpenCL on Pixel 10),
- * pre-warms during speech recording, and auto-unloads after 90s idle for 0% idle CPU/RAM.
+ * On-demand LiteRT-LM Gemma 4 E2B English-only native audio transcriber.
+ * Defaults to tuned CPU(6) inference with greedy decoding, audio preprocessing (silence trim
+ * + soft AGC), pre-warmed English dictation KV-cache on mic start, and 90s idle auto-unload.
  */
 object Gemma4AudioTranscriber {
 
@@ -71,9 +71,6 @@ object Gemma4AudioTranscriber {
 
     @Volatile
     private var baseConversationBackend: String = ""
-
-    @Volatile
-    private var baseConversationPrompt: String = ""
 
     @Volatile
     private var cloneUnsupportedForEngine: Boolean = false
@@ -114,19 +111,13 @@ object Gemma4AudioTranscriber {
 
     suspend fun prewarm(
         context: Context,
-        customVocabularyRaw: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
-        contextIndex: ContextIndex? = null,
+        @Suppress("UNUSED_PARAMETER") customVocabularyRaw: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+        @Suppress("UNUSED_PARAMETER") contextIndex: ContextIndex? = null,
     ) = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         if (!Gemma4ModelManager.isModelReady(appContext)) return@withContext
         val modelFile = Gemma4ModelManager.modelFile(appContext)
         val cacheDir = Gemma4ModelManager.cacheDir(appContext)
-        val compactVocab = Gemma4PromptBuilder.buildCompactVocabulary(
-            customVocabularyRaw = customVocabularyRaw,
-            contextIndex = contextIndex,
-            maxTerms = 60,
-        )
-        val systemPrompt = Gemma4PromptBuilder.buildSystemInstruction(compactVocab)
 
         engineMutex.withLock {
             idleUnloadJob?.cancel()
@@ -140,7 +131,7 @@ object Gemma4AudioTranscriber {
                 )
                 val engine = activeEngine ?: return@withLock
                 if (!cloneUnsupportedForEngine) {
-                    ensureBaseConversationLocked(engine, DEFAULT_BACKEND, systemPrompt)
+                    ensureBaseConversationLocked(engine, DEFAULT_BACKEND)
                 }
             } finally {
                 if (activeEngine != null) {
@@ -153,8 +144,8 @@ object Gemma4AudioTranscriber {
     suspend fun transcribePcm(
         context: Context,
         pcmBytes: ByteArray,
-        customVocabularyRaw: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
-        contextIndex: ContextIndex? = null,
+        @Suppress("UNUSED_PARAMETER") customVocabularyRaw: String = TranscriptNormalizer.DEFAULT_RAW_VOCABULARY,
+        @Suppress("UNUSED_PARAMETER") contextIndex: ContextIndex? = null,
         backendOverride: String? = null,
     ): Gemma4TranscriptionResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
@@ -163,14 +154,9 @@ object Gemma4AudioTranscriber {
             "Gemma 4 model missing or incomplete at ${modelFile.absolutePath}"
         }
         val cacheDir = Gemma4ModelManager.cacheDir(appContext)
-        val audioDurationMs = AudioPcmWavHelper.durationMs(pcmBytes)
-        val compactVocab = Gemma4PromptBuilder.buildCompactVocabulary(
-            customVocabularyRaw = customVocabularyRaw,
-            contextIndex = contextIndex,
-            maxTerms = 60,
-        )
-        val systemPrompt = Gemma4PromptBuilder.buildSystemInstruction(compactVocab)
-        val chunks = AudioPcmWavHelper.splitPcmIntoChunks(pcmBytes)
+        val cleanedPcm = AudioPcmWavHelper.preprocessForAsr(pcmBytes)
+        val audioDurationMs = AudioPcmWavHelper.durationMs(cleanedPcm)
+        val chunks = AudioPcmWavHelper.splitPcmIntoChunks(cleanedPcm)
         check(chunks.isNotEmpty()) { "Empty audio buffer" }
 
         val forcedBackend = backendOverride?.trim()?.lowercase(Locale.ROOT)?.let {
@@ -192,7 +178,6 @@ object Gemma4AudioTranscriber {
                     modelFile = modelFile,
                     cacheDir = cacheDir,
                     backendName = backendName,
-                    systemPrompt = systemPrompt,
                     chunks = chunks,
                     audioDurationMs = audioDurationMs,
                     reclaimGpuCache = reclaimGpuCache,
@@ -248,40 +233,64 @@ object Gemma4AudioTranscriber {
         return loadMs
     }
 
+    private fun buildConversationConfig(prefillPrefaceOnInit: Boolean): ConversationConfig = ConversationConfig(
+        systemInstruction = Contents.of(Gemma4PromptBuilder.buildEnglishSystemInstruction()),
+        samplerConfig = SamplerConfig(
+            topK = 1,
+            topP = 1.0,
+            temperature = 0.0,
+        ),
+        prefillPrefaceOnInit = prefillPrefaceOnInit,
+        maxOutputToken = MAX_OUTPUT_TOKENS,
+        thinkingConfig = ThinkingConfig(enableThinking = false),
+    )
+
     private fun ensureBaseConversationLocked(
         engine: Engine,
         backendName: String,
-        systemPrompt: String,
     ): Conversation? {
         if (cloneUnsupportedForEngine) return null
         val currentBase = baseConversation
-        if (currentBase != null &&
-            currentBase.isAlive &&
-            baseConversationBackend == backendName &&
-            baseConversationPrompt == systemPrompt
-        ) {
+        if (currentBase != null && currentBase.isAlive && baseConversationBackend == backendName) {
             return currentBase
         }
         runCatching { currentBase?.close() }
         baseConversation = null
         val createdBase = runCatching {
-            engine.createConversation(buildConversationConfig(systemPrompt, prefillPrefaceOnInit = true))
+            engine.createConversation(buildConversationConfig(prefillPrefaceOnInit = true))
         }.getOrNull()
         if (createdBase != null) {
             baseConversation = createdBase
             baseConversationBackend = backendName
-            baseConversationPrompt = systemPrompt
         } else {
             cloneUnsupportedForEngine = true
         }
         return baseConversation
     }
 
+    private fun borrowChunkConversationLocked(
+        engine: Engine,
+        backendName: String,
+    ): Conversation {
+        val base = ensureBaseConversationLocked(engine, backendName)
+        if (base != null) {
+            try {
+                return base.clone()
+            } catch (cloneErr: Throwable) {
+                Log.w(TAG, "Conversation.clone() unsupported on $backendName (${cloneErr.message}); disabling clone cache", cloneErr)
+                runCatching { base.close() }
+                baseConversation = null
+                baseConversationBackend = ""
+                cloneUnsupportedForEngine = true
+            }
+        }
+        return engine.createConversation(buildConversationConfig(prefillPrefaceOnInit = false))
+    }
+
     private suspend fun runWithBackendLocked(
         modelFile: File,
         cacheDir: File,
         backendName: String,
-        systemPrompt: String,
         chunks: List<ByteArray>,
         audioDurationMs: Long,
         reclaimGpuCache: Boolean,
@@ -300,7 +309,7 @@ object Gemma4AudioTranscriber {
 
         for (chunkPcm in chunks) {
             val wavBytes = AudioPcmWavHelper.pcmToWav(chunkPcm)
-            val (rawOut, benchSummary) = inferSingleChunk(engine, backendName, systemPrompt, wavBytes)
+            val (rawOut, benchSummary) = inferSingleChunk(engine, backendName, wavBytes)
             rawChunkOutputs += rawOut
             if (benchSummary.isNotEmpty()) {
                 lastBenchSummary = benchSummary
@@ -324,94 +333,23 @@ object Gemma4AudioTranscriber {
         )
     }
 
-    private fun buildConversationConfig(
-        systemPrompt: String,
-        prefillPrefaceOnInit: Boolean,
-    ): ConversationConfig = ConversationConfig(
-        systemInstruction = Contents.of(systemPrompt),
-        samplerConfig = SamplerConfig(
-            topK = 16,
-            topP = 0.90,
-            temperature = 0.1,
-        ),
-        prefillPrefaceOnInit = prefillPrefaceOnInit,
-        maxOutputToken = MAX_OUTPUT_TOKENS,
-        thinkingConfig = ThinkingConfig(enableThinking = false),
-    )
-
-    private fun borrowChunkConversationLocked(
-        engine: Engine,
-        backendName: String,
-        systemPrompt: String,
-    ): Conversation {
-        val base = ensureBaseConversationLocked(engine, backendName, systemPrompt)
-        if (base != null) {
-            try {
-                return base.clone()
-            } catch (cloneErr: Throwable) {
-                Log.w(TAG, "Conversation.clone() unsupported on $backendName (${cloneErr.message}); disabling clone cache", cloneErr)
-                runCatching { base.close() }
-                baseConversation = null
-                baseConversationBackend = ""
-                baseConversationPrompt = ""
-                cloneUnsupportedForEngine = true
-            }
-        }
-
-        return engine.createConversation(buildConversationConfig(systemPrompt, prefillPrefaceOnInit = false))
-    }
-
     @OptIn(ExperimentalApi::class)
     private suspend fun inferSingleChunk(
         engine: Engine,
         backendName: String,
-        systemPrompt: String,
         wavBytes: ByteArray,
     ): Pair<String, String> {
-        val conversation = borrowChunkConversationLocked(engine, backendName, systemPrompt)
+        val conversation = borrowChunkConversationLocked(engine, backendName)
         return try {
-            val rawOut = withTimeout(CHUNK_TIMEOUT_MS) {
-                suspendCancellableCoroutine { cont ->
-                    val finished = AtomicBoolean(false)
-                    val sb = StringBuilder()
-
-                    cont.invokeOnCancellation {
-                        if (finished.compareAndSet(false, true)) {
-                            runCatching { conversation.cancelProcess() }
-                        }
-                    }
-
-                    // Audio must precede text for proper autoregressive token sequencing in Gemma 4.
-                    val inputContents = Contents.of(
-                        Content.AudioBytes(wavBytes),
-                        Content.Text("Transcribe this voice task."),
-                    )
-
-                    conversation.sendMessageAsync(
-                        contents = inputContents,
-                        callback = object : MessageCallback {
-                            override fun onMessage(message: Message) {
-                                sb.append(message.toString())
-                            }
-
-                            override fun onDone() {
-                                if (finished.compareAndSet(false, true)) {
-                                    cont.resume(sb.toString())
-                                }
-                            }
-
-                            override fun onError(throwable: Throwable) {
-                                if (finished.compareAndSet(false, true)) {
-                                    cont.resumeWithException(throwable)
-                                }
-                            }
-                        },
-                        extraContext = mapOf("enable_thinking" to false),
-                        maxOutputToken = MAX_OUTPUT_TOKENS,
-                        thinkingConfig = ThinkingConfig(enableThinking = false),
-                    )
-                }
-            }
+            val inputContents = Contents.of(
+                Content.AudioBytes(wavBytes),
+                Content.Text("Transcribe this English voice task."),
+            )
+            val rawOut = runConversationMessage(
+                conversation = conversation,
+                contents = inputContents,
+                timeoutMs = CHUNK_TIMEOUT_MS,
+            )
             val benchSummary = runCatching {
                 val b = conversation.getBenchmarkInfo()
                 String.format(
@@ -436,6 +374,47 @@ object Gemma4AudioTranscriber {
         }
     }
 
+    private suspend fun runConversationMessage(
+        conversation: Conversation,
+        contents: Contents,
+        timeoutMs: Long,
+    ): String = withTimeout(timeoutMs) {
+        suspendCancellableCoroutine { cont ->
+            val finished = AtomicBoolean(false)
+            val sb = StringBuilder()
+
+            cont.invokeOnCancellation {
+                if (finished.compareAndSet(false, true)) {
+                    runCatching { conversation.cancelProcess() }
+                }
+            }
+
+            conversation.sendMessageAsync(
+                contents = contents,
+                callback = object : MessageCallback {
+                    override fun onMessage(message: Message) {
+                        sb.append(message.toString())
+                    }
+
+                    override fun onDone() {
+                        if (finished.compareAndSet(false, true)) {
+                            cont.resume(sb.toString())
+                        }
+                    }
+
+                    override fun onError(throwable: Throwable) {
+                        if (finished.compareAndSet(false, true)) {
+                            cont.resumeWithException(throwable)
+                        }
+                    }
+                },
+                extraContext = mapOf("enable_thinking" to false),
+                maxOutputToken = MAX_OUTPUT_TOKENS,
+                thinkingConfig = ThinkingConfig(enableThinking = false),
+            )
+        }
+    }
+
     private fun scheduleIdleUnloadLocked() {
         idleUnloadJob?.cancel()
         idleUnloadJob = lifecycleScope.launch {
@@ -453,7 +432,6 @@ object Gemma4AudioTranscriber {
         runCatching { baseConversation?.close() }
         baseConversation = null
         baseConversationBackend = ""
-        baseConversationPrompt = ""
         cloneUnsupportedForEngine = false
         runCatching { activeEngine?.close() }
         activeEngine = null

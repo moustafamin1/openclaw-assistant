@@ -69,4 +69,30 @@ class AudioPcmWavHelperTest {
         // Cut point should land cleanly inside the silent gap (25.0s..26.0s)
         assertTrue(chunks[0].size in (25 * AudioPcmWavHelper.BYTES_PER_SECOND)..(26 * AudioPcmWavHelper.BYTES_PER_SECOND))
     }
+
+    @Test
+    fun preprocessForAsrTrimsDeadSilenceAndBoostsQuietSpeechWithoutClipping() {
+        val leadSilence = ByteArray(AudioPcmWavHelper.BYTES_PER_SECOND * 2) // 2s silence
+        val quietSpeech = generateTonePcm(800, amplitude = 1200)
+        val tailSilence = ByteArray(AudioPcmWavHelper.BYTES_PER_SECOND * 2) // 2s silence
+        val raw = leadSilence + quietSpeech + tailSilence // 4.8s total
+
+        val cleaned = AudioPcmWavHelper.preprocessForAsr(raw)
+        val cleanedDuration = AudioPcmWavHelper.durationMs(cleaned)
+
+        // Should keep 800ms speech + ~440ms padding (~1.24s), trimming >3s of dead silence
+        assertTrue("Expected trimmed duration < 1800ms, got $cleanedDuration", cleanedDuration in 900L..1800L)
+
+        // Peak should be boosted well above 1200 without clipping above 29000
+        var peak = 0
+        var i = 0
+        while (i + 1 < cleaned.size) {
+            val sample = ((cleaned[i + 1].toInt() shl 8) or (cleaned[i].toInt() and 0xFF))
+            val absSample = kotlin.math.abs(sample)
+            if (absSample > peak) peak = absSample
+            i += 2
+        }
+        assertTrue("Expected boosted peak > 4000, got $peak", peak > 4000)
+        assertTrue("Expected no clipping <= 29000, got $peak", peak <= 29_000)
+    }
 }
