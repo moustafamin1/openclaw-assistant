@@ -542,7 +542,7 @@ fun TickTickCaptureSettingsContent(
                                 )
                             }
                             Text(
-                                text = "100% offline • stays warm (~1 GB RAM) • 0% idle CPU • unloads on RAM pressure",
+                                text = "100% offline • 0% idle CPU • auto-unloads after 90s",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

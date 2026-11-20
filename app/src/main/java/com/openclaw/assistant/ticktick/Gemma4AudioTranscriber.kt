@@ -17,7 +17,9 @@ import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -44,13 +46,13 @@ data class Gemma4TranscriptionResult(
 /**
  * On-demand LiteRT-LM Gemma 4 E2B English-only native audio transcriber.
  * Defaults to tuned CPU(6) inference with greedy decoding, audio preprocessing (silence trim
- * + soft AGC), pre-warmed English dictation KV-cache, and stays warm in RAM until
- * `onTrimMemory` / `onLowMemory` or manual `unloadNow()`.
+ * + soft AGC), pre-warmed English dictation KV-cache on mic start, and 90s idle auto-unload.
  */
 object Gemma4AudioTranscriber {
 
     private const val TAG = "Gemma4Audio"
     private const val DEFAULT_BACKEND = "CPU"
+    private const val IDLE_UNLOAD_TIMEOUT_MS = 90_000L
     private const val MAX_NUM_TOKENS = 1024
     private const val MAX_OUTPUT_TOKENS = 128
     private const val CHUNK_TIMEOUT_MS = 60_000L
@@ -73,6 +75,9 @@ object Gemma4AudioTranscriber {
     @Volatile
     private var cloneUnsupportedForEngine: Boolean = false
 
+    @Volatile
+    private var idleUnloadJob: Job? = null
+
     private fun preferredCpuThreads(): Int =
         Runtime.getRuntime().availableProcessors().coerceIn(4, 6)
 
@@ -89,12 +94,16 @@ object Gemma4AudioTranscriber {
     fun isLoaded(): Boolean = activeEngine?.isInitialized() == true
 
     fun unloadNow() {
+        idleUnloadJob?.cancel()
+        idleUnloadJob = null
         lifecycleScope.launch {
             unloadAndAwait()
         }
     }
 
     suspend fun unloadAndAwait() = withContext(Dispatchers.IO) {
+        idleUnloadJob?.cancel()
+        idleUnloadJob = null
         engineMutex.withLock {
             closeEngineLocked()
         }
@@ -111,15 +120,23 @@ object Gemma4AudioTranscriber {
         val cacheDir = Gemma4ModelManager.cacheDir(appContext)
 
         engineMutex.withLock {
-            ensureEngineInitializedLocked(
-                modelFile = modelFile,
-                cacheDir = cacheDir,
-                backendName = DEFAULT_BACKEND,
-                reclaimGpuCache = true,
-            )
-            val engine = activeEngine ?: return@withLock
-            if (!cloneUnsupportedForEngine) {
-                ensureBaseConversationLocked(engine, DEFAULT_BACKEND)
+            idleUnloadJob?.cancel()
+            idleUnloadJob = null
+            try {
+                ensureEngineInitializedLocked(
+                    modelFile = modelFile,
+                    cacheDir = cacheDir,
+                    backendName = DEFAULT_BACKEND,
+                    reclaimGpuCache = true,
+                )
+                val engine = activeEngine ?: return@withLock
+                if (!cloneUnsupportedForEngine) {
+                    ensureBaseConversationLocked(engine, DEFAULT_BACKEND)
+                }
+            } finally {
+                if (activeEngine != null) {
+                    scheduleIdleUnloadLocked()
+                }
             }
         }
     }
@@ -153,14 +170,23 @@ object Gemma4AudioTranscriber {
         val reclaimGpuCache = (forcedBackend == null && backendName == "CPU")
 
         engineMutex.withLock {
-            runWithBackendLocked(
-                modelFile = modelFile,
-                cacheDir = cacheDir,
-                backendName = backendName,
-                chunks = chunks,
-                audioDurationMs = audioDurationMs,
-                reclaimGpuCache = reclaimGpuCache,
-            )
+            idleUnloadJob?.cancel()
+            idleUnloadJob = null
+
+            try {
+                runWithBackendLocked(
+                    modelFile = modelFile,
+                    cacheDir = cacheDir,
+                    backendName = backendName,
+                    chunks = chunks,
+                    audioDurationMs = audioDurationMs,
+                    reclaimGpuCache = reclaimGpuCache,
+                )
+            } finally {
+                if (activeEngine != null) {
+                    scheduleIdleUnloadLocked()
+                }
+            }
         }
     }
 
@@ -386,6 +412,19 @@ object Gemma4AudioTranscriber {
                 maxOutputToken = MAX_OUTPUT_TOKENS,
                 thinkingConfig = ThinkingConfig(enableThinking = false),
             )
+        }
+    }
+
+    private fun scheduleIdleUnloadLocked() {
+        idleUnloadJob?.cancel()
+        idleUnloadJob = lifecycleScope.launch {
+            delay(IDLE_UNLOAD_TIMEOUT_MS)
+            engineMutex.withLock {
+                if (activeEngine != null) {
+                    Log.i(TAG, "Auto-unloading Gemma 4 engine after ${IDLE_UNLOAD_TIMEOUT_MS}ms idle")
+                    closeEngineLocked()
+                }
+            }
         }
     }
 
